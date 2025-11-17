@@ -1,0 +1,26 @@
+output_dir: results/example_ridge
+
+model:
+  backend: sklearn
+  name: ridge
+  params:
+    alpha: 1.0
+
+splits:
+  strategy: group_kfold
+  n_splits: 5
+
+dataset:
+  eeg_path: data/eeg.npy
+  audio_path: data/audio.npy
+  metadata_path: null
+  task: decoding
+  eeg_representation:
+    name: time
+    params: {}
+  audio_representation:
+    name: envelope
+    params:
+      smoothing: 25
+  lags: [0, 1, 2]
+  per_subject_scaling: false
