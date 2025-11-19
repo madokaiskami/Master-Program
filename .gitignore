@@ -1,0 +1,23 @@
+# ==== 数据集缓存一律忽略 ====
+data/
+!data/.gitkeep
+!data/README.md
+# Python bytecode / cache
+__pycache__/
+
+
+# 如果你只想忽略 HF 缓存而保留其它 data，可以用更窄的：
+# data/hf_eeg_audio/
+
+# 常见大文件（防止未来误加）
+*.npz
+*.npy
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.wav
+*.flac
+*.pyc
+*.pyo
+*.pyd
