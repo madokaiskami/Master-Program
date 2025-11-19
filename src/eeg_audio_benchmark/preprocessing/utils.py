@@ -33,6 +33,28 @@ def gaussian_smooth(data: np.ndarray, sigma: float) -> np.ndarray:
     return smoothed
 
 
+def resolve_dataset_path(path_like: Optional[str], dataset_root: Path) -> Optional[Path]:
+    """Resolve a path template against a dataset root.
+
+    Parameters
+    ----------
+    path_like:
+        A path string that may contain ``{dataset_root}`` placeholders. ``None``
+        returns ``None``.
+    dataset_root:
+        Base path used to expand placeholders.
+
+    Returns
+    -------
+    Optional[Path]
+        Resolved ``Path`` or ``None`` if ``path_like`` is ``None``.
+    """
+
+    if path_like is None:
+        return None
+    return Path(str(path_like).format(dataset_root=str(dataset_root)))
+
+
 def dataframe_from_file(path: Path, sheet_name: Optional[str] = None) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Table file not found: {path}")
@@ -67,6 +89,7 @@ class SlidingWindow:
 __all__ = [
     "ensure_directory",
     "gaussian_smooth",
+    "resolve_dataset_path",
     "dataframe_from_file",
     "parse_config",
     "load_step_config",

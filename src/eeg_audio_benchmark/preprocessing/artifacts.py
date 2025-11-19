@@ -1,4 +1,4 @@
-"""Artifact evaluation utilities."""
+"""Artifact evaluation utilities built on top of HF-based epochs."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import matplotlib.pyplot as plt
+from eeg_audio_benchmark.hf_data import LOCAL_DATA_ROOT
 
-from .utils import ensure_directory, gaussian_smooth
+from .utils import ensure_directory, gaussian_smooth, resolve_dataset_path
 
 
 METRIC_NAMES = [
@@ -27,8 +28,10 @@ METRIC_NAMES = [
 
 @dataclass
 class ArtifactReportConfig:
-    epoch_dir: str
-    output_csv: str
+    dataset_root: str = str(LOCAL_DATA_ROOT)
+    epoch_dir: str = "{dataset_root}/derivatives/epochs"
+    epoch_manifest: str = "{dataset_root}/derivatives/epoch_manifest.csv"
+    output_csv: str = "{dataset_root}/derivatives/qc/artifacts_report.csv"
     log_level: str = "INFO"
     smoothing_sigma: float = 0.0
     metric_weights: Dict[str, float] = field(
@@ -90,54 +93,82 @@ def _composite_scores(df: pd.DataFrame, weights: Dict[str, float]) -> np.ndarray
     return comps
 
 
+def _resolve_epoch_path(row: pd.Series, epoch_dir: Path, dataset_root: Path) -> Path:
+    epoch_path = Path(str(row["epoch_path"]))
+    if not epoch_path.is_absolute():
+        if (dataset_root / epoch_path).exists():
+            return dataset_root / epoch_path
+        return epoch_dir / epoch_path.name
+    return epoch_path
+
+
 def compute_artifact_report(config: ArtifactReportConfig) -> Path:
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
     logger = logging.getLogger(__name__)
-    epoch_dir = Path(config.epoch_dir)
-    if not epoch_dir.exists():
-        raise FileNotFoundError(epoch_dir)
+
+    dataset_root = Path(config.dataset_root)
+    epoch_dir = resolve_dataset_path(config.epoch_dir, dataset_root)
+    manifest_path = resolve_dataset_path(config.epoch_manifest, dataset_root)
+    if epoch_dir is None or manifest_path is None:
+        raise ValueError("epoch_dir and epoch_manifest must be provided")
+
+    manifest_df = pd.read_csv(manifest_path)
+    if manifest_df.empty:
+        raise ValueError("Epoch manifest is empty; run eeg_epochs first")
+
     rows: List[Dict[str, float]] = []
     cached_epochs: List[np.ndarray] = []
-    epoch_paths = sorted(epoch_dir.glob("*.npy"))
-    for epoch_path in epoch_paths:
+
+    for _, row in manifest_df.iterrows():
+        epoch_path = _resolve_epoch_path(row, epoch_dir, dataset_root)
+        if not epoch_path.exists():
+            raise FileNotFoundError(epoch_path)
+
         epoch = _load_epoch(epoch_path)
         cached_epochs.append(epoch)
         eeg = epoch[:, 2:]
         if config.smoothing_sigma > 0:
             eeg = gaussian_smooth(eeg, config.smoothing_sigma)
         metrics = _compute_metrics(eeg)
-        row = {
-            "Epoch_Filename": epoch_path.name,
-            "Subject_ID": epoch_path.stem.split("_")[0],
-            "Sequence_Number": epoch_path.stem.split("_")[1] if "_" in epoch_path.stem else "0",
-            "WAV_Filename_Base": epoch_path.stem.split("_")[-1],
+        artifact_row: Dict[str, float] = {
+            "epoch_path": row["epoch_path"],
+            "epoch_filename": epoch_path.name,
+            "subject_id": row.get("subject_id"),
+            "run_id": row.get("run_id"),
+            "event_index": row.get("event_index"),
+            "stim_id": row.get("stim_id"),
+            "audio_file": row.get("audio_file"),
         }
-        row.update(metrics)
-        rows.append(row)
-    if not rows:
-        raise ValueError("No epoch files found")
+        artifact_row.update(metrics)
+        rows.append(artifact_row)
+
     df = _prepare_dataframe(rows)
     df["Composite_Score"] = _composite_scores(df, config.metric_weights)
     df["Is_Artifact"] = df["Composite_Score"] >= config.composite_threshold
+
     if config.artifact_plots_dir:
-        plot_dir = Path(config.artifact_plots_dir)
-        ensure_directory(plot_dir)
-        for idx, (epoch_arr, is_artifact, row) in enumerate(
-            zip(cached_epochs, df["Is_Artifact"], rows)
-        ):
-            if not bool(is_artifact):
-                continue
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(epoch_arr[:, 0], epoch_arr[:, 2:])
-            ax.set_title(
-                f"Artifact epoch {row['Epoch_Filename']} score={df.loc[idx, 'Composite_Score']:.2f}"
-            )
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel("Amplitude")
-            fig.tight_layout()
-            fig.savefig(plot_dir / f"artifact_{idx:04d}.png")
-            plt.close(fig)
-    output_path = Path(config.output_csv)
+        plot_dir = resolve_dataset_path(config.artifact_plots_dir, dataset_root)
+        if plot_dir:
+            ensure_directory(plot_dir)
+            for idx, (epoch_arr, is_artifact, row) in enumerate(
+                zip(cached_epochs, df["Is_Artifact"], rows)
+            ):
+                if not bool(is_artifact):
+                    continue
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.plot(epoch_arr[:, 0], epoch_arr[:, 2:])
+                ax.set_title(
+                    f"Artifact epoch {row['epoch_filename']} score={df.loc[idx, 'Composite_Score']:.2f}"
+                )
+                ax.set_xlabel("Time (s)")
+                ax.set_ylabel("Amplitude")
+                fig.tight_layout()
+                fig.savefig(plot_dir / f"artifact_{idx:04d}.png")
+                plt.close(fig)
+
+    output_path = resolve_dataset_path(config.output_csv, dataset_root)
+    if output_path is None:
+        raise ValueError("output_csv must be provided")
     ensure_directory(output_path.parent)
     df.to_csv(output_path, index=False)
     logger.info("Artifact report saved to %s", output_path)

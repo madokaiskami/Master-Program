@@ -21,93 +21,44 @@ Master-Program/
 
 核心思想如下：
 
-1. **预处理流水线**（`src/eeg_audio_benchmark/preprocessing/`）将四个历史 Tk GUI 脚本拆解为纯函数：
-   - `eeg_epochs.py`：从 CBYT 文件与刺激注释切片出固定长度的 EEG epoch。
+1. **预处理流水线**（`src/eeg_audio_benchmark/preprocessing/`）围绕 HuggingFace 数据集 `Aurelianous/eeg-audio` 展开，使用 HF manifest、原始 EEG `.npz`、事件 CSV 与 WAV 为唯一输入：
+   - `eeg_epochs.py`：基于事件表切片 EEG，输出 epoch `.npy` 与 epoch manifest。
    - `artifacts.py`：计算多种伪迹指标，输出包含 `Is_Artifact` 的 CSV 报告。
-   - `audio_features.py`：批量抽取 Librosa 音频特征并保存矩阵/时间戳。
-   - `alignment.py`：对“干净”epoch 与音频特征做滑窗、插值并输出对齐后的 `.npy`。
+   - `audio_features.py`：批量抽取 Librosa 音频特征并保存矩阵/时间戳，同时生成特征 manifest。
+   - `alignment.py`：对“干净”epoch 与音频特征做滑窗、插值并输出对齐后的 `.npy` 与对齐 manifest。
 2. **实验框架**（`datasets.py`, `representations.py`, `models/`, `evaluation.py`, `experiment.py`）负责将对齐好的 EEG/音频矩阵装配成 lagged design matrix，执行划分、建模与评估。
 3. **配置系统**（`config.py` + `preprocessing/utils.py`）提供加载 YAML 与 dataclass 解析的统一入口，使 CLI 与 Python API 都能通过同一份配置运行。
 
 ## 预处理流水线
 
-四个步骤彼此独立，可以单独运行，也可以通过总入口串联执行。所有函数都接受对应的 dataclass 配置，字段含义与历史 GUI 选项一致。
+四个步骤彼此独立，可以单独运行，也可以通过总入口串联执行。所有函数都接受对应的 dataclass 配置，字段围绕 HF manifest 设计。
 
 ### 1. EEG 切片 (`slice_eeg_to_epochs`)
-- 输入：CBYT 原始 EEG、刺激说明 Excel/CSV、可选 marker 表。
-- 输出：`<cbyt>_<seq>_<wav>.npy`，包含时间、标记、32 个通道。
-- 关键配置：`epoch_duration`、`anchor`（start/end/auto）、`resample_hz`、`smoothing_sigma`。
-- CLI：
-  ```bash
-  python -m eeg_audio_benchmark.bin.run_eeg_epochs --config configs/eeg_epochs.yaml
-  ```
+- 输入：`manifest_raw_runs.csv` + 对应的 `raw/eeg/*.npz` 和 `raw/events/*.csv`。
+- 输出：`{subject}_{run}_evt-<idx>_<stim>.npy`（时间、事件索引、通道）和 `derivatives/epoch_manifest.csv`。
+- 关键配置：`epoch_duration_sec`、`anchor`（onset/center）、`resample_hz`、`smoothing_sigma`。
 
 ### 2. 伪迹评分 (`compute_artifact_report`)
-- 输入：步骤 1 生成的 epoch 目录。
+- 输入：epoch manifest + epoch 目录。
 - 输出：含各类指标、Z 分数、`Composite_Score`、`Is_Artifact` 的 CSV，可选伪迹可视化。
-- 关键配置：`metric_weights`、`composite_threshold`、`smoothing_sigma`、`artifact_plots_dir`。
-- CLI：
-  ```bash
-  python -m eeg_audio_benchmark.bin.run_artifacts --config configs/artifacts.yaml
-  ```
 
 ### 3. 音频特征 (`extract_audio_features`)
-- 输入：WAV 音频目录。
-- 输出：每个音频的 `*_features.npy`、`*_feature_times.npy`、`*_feature_names.txt`。
-- 关键配置：`frame_length`、`hop_length`、`n_mfcc`、`pyin_fmin/fmax`、统一采样率。
-- CLI：
-  ```bash
-  python -m eeg_audio_benchmark.bin.run_audio_features --config configs/audio_features.yaml
-  ```
+- 输入：epoch manifest 中引用的 WAV（`raw/audio/stimuli`）。
+- 输出：每个音频的 `*_features.npy`、`*_feature_times.npy`、`*_feature_names.txt`，并记录特征 manifest。
 
 ### 4. EEG/音频对齐 (`align_eeg_audio_pairs`)
-- 输入：epoch 目录、伪迹 CSV、音频特征目录。
-- 输出：`*_EEG_aligned.npy` 与 `*_Sound_aligned.npy`，采样在统一的目标网格上。
-- 关键配置：`eeg_sampling_rate`、`eeg_window_ms`、`eeg_step_ms`、`target_duration`、`target_hop`、`missing_policy`。
-- CLI：
-  ```bash
-  python -m eeg_audio_benchmark.bin.run_alignment --config configs/alignment.yaml
-  ```
+- 输入：epoch manifest、伪迹 CSV、音频特征目录。
+- 输出：`*_EEG_aligned.npy` 与 `*_Sound_aligned.npy`，采样在统一的目标网格上，并生成 `manifest_epochs.csv`。
 
 ### 串联运行
 
-若想一次性跑完整条流水线，可编写如下顶层配置并调用 `run_preprocessing`：
-
-```yaml
-# configs/pipeline.yaml
-log_level: INFO
-
-eeg_epochs:
-  enabled: true
-  output_dir: data/epochs
-  cbyt_dir: data/raw/cbyt
-  stimulus_table: data/meta/stimuli.xlsx
-  epoch_duration: 4.0
-  anchor: auto
-
-artifacts:
-  enabled: true
-  epoch_dir: data/epochs
-  output_csv: data/epochs/artifact_report.csv
-
-audio_features:
-  enabled: true
-  wav_dir: data/audio
-  output_dir: data/audio_features
-
-alignment:
-  enabled: true
-  eeg_epoch_dir: data/epochs
-  artifact_report: data/epochs/artifact_report.csv
-  audio_feature_dir: data/audio_features
-  output_dir: data/aligned
-```
-
-运行命令：
+推荐使用 HuggingFace 数据缓存 + 预处理一条龙命令：
 
 ```bash
-python -m eeg_audio_benchmark.bin.run_preprocessing --config configs/pipeline.yaml
+python -m eeg_audio_benchmark.bin.sync_hf_data --preproc-config configs/preproc_on_hf.yaml
 ```
+
+`configs/preproc_on_hf.yaml` 展示了以 HF 目录为核心的配置格式，可直接在其中调整切片长度、特征参数或输出目录。
 
 ## 与实验框架衔接
 
