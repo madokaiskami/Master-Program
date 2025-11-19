@@ -11,9 +11,11 @@ splits:
   n_splits: 5
 
 dataset:
-  eeg_path: data/eeg.npy
-  audio_path: data/audio.npy
-  metadata_path: null
+  # 来自对齐步骤的单个 EEG/音频样本，需共享时间轴
+  eeg_path: data/aligned/sample_EEG_aligned.npy
+  audio_path: data/aligned/sample_Sound_aligned.npy
+  # 可选元数据（如 subject），用于分层/组划分
+  metadata_path: data/aligned/metadata.npz
   task: decoding
   eeg_representation:
     name: time

@@ -1,0 +1,19 @@
+log_level: INFO
+# 输入：EEG epoch 目录
+epoch_dir: data/epochs
+# 输出：综合评分 CSV 路径
+output_csv: data/epochs/artifact_report.csv
+# 平滑强度（对 EEG 通道）
+smoothing_sigma: 0.0
+# 指标权重，可按需调整
+metric_weights:
+  std: 1.0
+  rms: 1.0
+  max_abs: 1.0
+  ratio_max_meanabs: 1.0
+  ratio_max_std: 1.0
+  ratio_maxdev_mad: 1.0
+# 大于此阈值的 epoch 视为伪迹
+composite_threshold: 2.0
+# 可选：保存伪迹可视化的目录
+artifact_plots_dir: null
