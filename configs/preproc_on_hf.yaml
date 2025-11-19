@@ -1,0 +1,69 @@
+# Default preprocessing configuration targeting the HuggingFace dataset layout
+# rooted at {dataset_root} (by default data/hf_eeg_audio).
+
+dataset_root: data/hf_eeg_audio
+
+eeg_epochs:
+  enabled: true
+  input:
+    manifest_raw_runs: "{dataset_root}/manifest_raw_runs.csv"
+  output:
+    epoch_dir: "{dataset_root}/derivatives/epochs"
+    epoch_manifest: "{dataset_root}/derivatives/epoch_manifest.csv"
+  params:
+    epoch_duration_sec: 4.0
+    anchor: onset
+    resample_hz: null
+    smoothing_sigma: 0.0
+
+artifacts:
+  enabled: true
+  input:
+    epoch_dir: "{dataset_root}/derivatives/epochs"
+    epoch_manifest: "{dataset_root}/derivatives/epoch_manifest.csv"
+  output:
+    report_csv: "{dataset_root}/derivatives/qc/artifacts_report.csv"
+    artifact_plots_dir: null
+  params:
+    smoothing_sigma: 0.0
+    composite_threshold: 2.0
+
+
+# Audio features are derived directly from the WAV files referenced in the
+# epoch manifest (raw/audio/stimuli under the dataset root).
+audio_features:
+  enabled: true
+  input:
+    epoch_manifest: "{dataset_root}/derivatives/epoch_manifest.csv"
+    wav_dir: "{dataset_root}/raw/audio/stimuli"
+  output:
+    feature_dir: "{dataset_root}/derivatives/audio_features"
+    feature_manifest: "{dataset_root}/derivatives/audio_features/manifest_audio_features.csv"
+  params:
+    sampling_rate: 22050
+    frame_length: 0.046
+    hop_length: 0.011
+    n_mfcc: 20
+    fmin: 50.0
+    fmax: null
+    pyin_fmin: 50.0
+    pyin_fmax: 600.0
+
+alignment:
+  enabled: true
+  input:
+    epoch_manifest: "{dataset_root}/derivatives/epoch_manifest.csv"
+    artifact_report: "{dataset_root}/derivatives/qc/artifacts_report.csv"
+    audio_feature_dir: "{dataset_root}/derivatives/audio_features"
+  output:
+    aligned_eeg_dir: "{dataset_root}/derivatives/aligned/eeg"
+    aligned_audio_dir: "{dataset_root}/derivatives/aligned/audio"
+    manifest_epochs: "{dataset_root}/manifest_epochs.csv"
+  params:
+    eeg_sampling_rate: 512.0
+    eeg_window_ms: 250.0
+    eeg_step_ms: 50.0
+    target_duration: 4.0
+    target_hop: 0.011
+    smoothing_sigma: 0.0
+    missing_policy: warn

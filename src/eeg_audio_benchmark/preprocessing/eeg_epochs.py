@@ -1,204 +1,172 @@
-"""EEG epoch slicing utilities."""
+"""EEG epoch slicing utilities tailored for the HF dataset layout."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from .utils import dataframe_from_file, ensure_directory, gaussian_smooth
+from eeg_audio_benchmark.hf_data import LOCAL_DATA_ROOT
 
-
-CBYT_DTYPE = np.dtype([
-    ("time_sec", "d"),
-    ("marker", "i"),
-    ("data", "d", (32,)),
-])
+from .utils import ensure_directory, gaussian_smooth, resolve_dataset_path
 
 
 @dataclass
 class EEGEpochConfig:
-    output_dir: str
-    epoch_duration: float
-    anchor: str = "auto"
-    log_level: str = "INFO"
-    cbyt_files: Optional[List[str]] = None
-    cbyt_dir: Optional[str] = None
-    cbyt_pattern: str = "*.CBYT"
-    stimulus_table: Optional[str] = None
-    stimulus_sheet: Optional[str] = None
-    stim_sequence_column: str = "Sequence_Number"
-    stim_wav_column: str = "WAV_Filename"
-    stim_start_column: str = "Start_Time"
-    stim_end_column: str = "End_Time"
-    marker_table: Optional[str] = None
-    marker_sheet: Optional[str] = None
-    marker_start_column: str = "time of beginning"
-    marker_end_column: str = "time of the end"
+    """Configuration for slicing continuous EEG into epochs using HF metadata."""
+
+    dataset_root: str = str(LOCAL_DATA_ROOT)
+    manifest_raw_runs: str = "{dataset_root}/manifest_raw_runs.csv"
+    output_dir: str = "{dataset_root}/derivatives/epochs"
+    epoch_manifest: str = "{dataset_root}/derivatives/epoch_manifest.csv"
+    epoch_duration_sec: float = 4.0
+    anchor: str = "onset"  # "onset" or "center"
     resample_hz: Optional[float] = None
     smoothing_sigma: float = 0.0
+    log_level: str = "INFO"
 
 
-@dataclass
-class StimulusRecord:
-    sequence: int
-    wav_base: str
-    start: Optional[float]
-    end: Optional[float]
+def _load_eeg_npz(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    data = np.load(path)
+    return data["times"], data["data"].astype(np.float32)
 
 
-def _discover_cbyt_files(config: EEGEpochConfig) -> List[Path]:
-    if config.cbyt_files:
-        return [Path(p) for p in config.cbyt_files]
-    if not config.cbyt_dir:
-        raise ValueError("Either cbyt_files or cbyt_dir must be provided")
-    return sorted(Path(config.cbyt_dir).expanduser().glob(config.cbyt_pattern))
+def _load_events(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    required = {"subject_id", "run_id", "onset_sec", "stim_id", "audio_file"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Events file {path} missing columns: {sorted(missing)}")
+    return df
 
 
-def _load_table_records(
-    path: Optional[str],
-    sheet_name: Optional[str],
-    sequence_column: str,
-    wav_column: Optional[str] = None,
-    start_column: Optional[str] = None,
-    end_column: Optional[str] = None,
-) -> Dict[int, Dict[str, Optional[float]]]:
-    if not path:
-        return {}
-    df = dataframe_from_file(Path(path), sheet_name)
-    records: Dict[int, Dict[str, Optional[float]]] = {}
-    for _, row in df.iterrows():
-        if sequence_column not in row or pd.isna(row[sequence_column]):
-            continue
-        try:
-            seq = int(row[sequence_column])
-        except Exception:
-            continue
-        rec: Dict[str, Optional[float]] = {}
-        if wav_column and wav_column in row and pd.notna(row[wav_column]):
-            rec["wav_base"] = Path(str(row[wav_column])).stem
-        if start_column and start_column in row and pd.notna(row[start_column]):
-            rec["start"] = float(row[start_column])
-        if end_column and end_column in row and pd.notna(row[end_column]):
-            rec["end"] = float(row[end_column])
-        records[seq] = rec
-    return records
-
-
-def _merge_records(config: EEGEpochConfig) -> Dict[int, StimulusRecord]:
-    stim_records = _load_table_records(
-        config.stimulus_table,
-        config.stimulus_sheet,
-        config.stim_sequence_column,
-        wav_column=config.stim_wav_column,
-        start_column=config.stim_start_column,
-        end_column=config.stim_end_column,
-    )
-    marker_records = _load_table_records(
-        config.marker_table,
-        config.marker_sheet,
-        config.stim_sequence_column,
-        start_column=config.marker_start_column,
-        end_column=config.marker_end_column,
-    )
-    merged: Dict[int, StimulusRecord] = {}
-    keys = set(stim_records) | set(marker_records)
-    for seq in sorted(keys):
-        stim = stim_records.get(seq, {})
-        marker = marker_records.get(seq, {})
-        wav_base = stim.get("wav_base") or f"stim_{seq:03d}"
-        start = stim.get("start")
-        end = stim.get("end")
-        if marker.get("start") is not None:
-            start = marker["start"]
-        if marker.get("end") is not None:
-            end = marker["end"]
-        merged[seq] = StimulusRecord(sequence=seq, wav_base=wav_base, start=start, end=end)
-    return merged
-
-
-def _load_cbyt_file(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    raw = np.fromfile(path, dtype=CBYT_DTYPE)
-    if raw.size == 0:
-        raise ValueError(f"No samples found in {path}")
-    return raw["time_sec"], raw["data"].astype(np.float32)
-
-
-def _resample(times: np.ndarray, data: np.ndarray, target_rate: Optional[float]) -> tuple[np.ndarray, np.ndarray]:
+def _resample(times: np.ndarray, data: np.ndarray, target_rate: Optional[float]) -> Tuple[np.ndarray, np.ndarray]:
     if not target_rate:
         return times, data
-    start = times[0]
-    stop = times[-1]
+    start, stop = times[0], times[-1]
     step = 1.0 / target_rate
-    new_times = np.arange(start, stop, step)
+    new_times = np.arange(start, stop, step, dtype=np.float64)
     interp_data = np.vstack(
         [np.interp(new_times, times, data[:, ch]) for ch in range(data.shape[1])]
     ).T
     return new_times, interp_data.astype(np.float32)
 
 
-def _epoch_bounds(record: StimulusRecord, duration: float, anchor: str) -> Optional[tuple[float, float]]:
+def _event_bounds(row: pd.Series, duration: float, anchor: str) -> Optional[Tuple[float, float]]:
     anchor = anchor.lower()
-    start = record.start
-    end = record.end
-    if anchor == "start" and start is not None:
-        return start, start + duration
-    if anchor == "end" and end is not None:
-        return end - duration, end
-    if anchor == "auto":
-        if start is not None:
-            return start, start + duration
-        if end is not None:
-            return end - duration, end
-    return None
+    onset = float(row["onset_sec"])
+    offset = row.get("offset_sec")
+    if anchor == "center" and pd.notna(offset):
+        center = 0.5 * (onset + float(offset))
+        start = center - duration / 2.0
+    else:
+        start = onset
+    end = start + duration
+    return start, end
 
 
-def _build_epoch(times: np.ndarray, data: np.ndarray, start: float, end: float, sequence: int) -> Optional[np.ndarray]:
+def _build_epoch(times: np.ndarray, data: np.ndarray, start: float, end: float, event_index: int) -> Optional[np.ndarray]:
     mask = (times >= start) & (times <= end)
     if not mask.any():
         return None
     rel_times = times[mask] - start
     eeg = data[mask]
-    markers = np.full(rel_times.shape, -1.0, dtype=np.float32)
-    markers[0] = float(sequence)
+    markers = np.full(rel_times.shape, float(event_index), dtype=np.float32)
     epoch = np.column_stack((rel_times.astype(np.float32), markers, eeg))
     return epoch
+
+
+def _relative_to_root(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def slice_eeg_to_epochs(config: EEGEpochConfig) -> List[Path]:
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
     logger = logging.getLogger(__name__)
-    ensure_directory(Path(config.output_dir))
-    records = _merge_records(config)
-    if not records:
-        raise ValueError("No stimulus records available")
 
+    dataset_root = Path(config.dataset_root)
+    manifest_path = resolve_dataset_path(config.manifest_raw_runs, dataset_root)
+    output_dir = resolve_dataset_path(config.output_dir, dataset_root)
+    manifest_out = resolve_dataset_path(config.epoch_manifest, dataset_root)
+
+    if manifest_path is None or output_dir is None or manifest_out is None:
+        raise ValueError("Configuration must provide manifest_raw_runs, output_dir, and epoch_manifest")
+
+    ensure_directory(output_dir)
+
+    runs_df = pd.read_csv(manifest_path)
+    required_cols = {"subject_id", "run_id", "eeg_file", "events_file"}
+    missing_cols = required_cols - set(runs_df.columns)
+    if missing_cols:
+        raise ValueError(f"Raw runs manifest missing columns: {sorted(missing_cols)}")
+
+    manifest_rows: List[dict] = []
     output_files: List[Path] = []
-    for cbyt_path in _discover_cbyt_files(config):
-        logger.info("Processing %s", cbyt_path)
-        times, data = _load_cbyt_file(cbyt_path)
+
+    for _, run in runs_df.iterrows():
+        eeg_path = dataset_root / run["eeg_file"]
+        events_path = dataset_root / run["events_file"]
+        if not eeg_path.exists():
+            raise FileNotFoundError(eeg_path)
+        if not events_path.exists():
+            raise FileNotFoundError(events_path)
+
+        logger.info("Processing %s | %s", run.get("subject_id"), run.get("run_id"))
+        times, data = _load_eeg_npz(eeg_path)
         times, data = _resample(times, data, config.resample_hz)
         if config.smoothing_sigma > 0:
             data = gaussian_smooth(data, config.smoothing_sigma)
-        base = cbyt_path.stem
-        for record in records.values():
-            bounds = _epoch_bounds(record, config.epoch_duration, config.anchor)
-            if not bounds:
-                continue
-            start, end = bounds
-            epoch = _build_epoch(times, data, start, end, record.sequence)
+
+        events_df = _load_events(events_path)
+        for event_idx, event_row in events_df.iterrows():
+            start, end = _event_bounds(event_row, config.epoch_duration_sec, config.anchor)
+            epoch = _build_epoch(times, data, start, end, event_idx)
             if epoch is None:
-                logger.debug("No samples for stimulus %s in %s", record.sequence, cbyt_path)
+                logger.debug(
+                    "Skipping event %s (no samples between %.2f-%.2f)",
+                    event_row.get("stim_id", event_idx),
+                    start,
+                    end,
+                )
                 continue
-            fname = f"{base}_{record.sequence:03d}_{record.wav_base}.npy"
-            out_path = Path(config.output_dir) / fname
-            np.save(out_path, epoch.astype(np.float32))
-            output_files.append(out_path)
-    logger.info("Saved %d epochs to %s", len(output_files), config.output_dir)
+
+            stim_id = str(event_row.get("stim_id", f"evt{event_idx:03d}"))
+            base = f"{run['subject_id']}_{run['run_id']}_evt-{event_idx:03d}_{stim_id}"
+            epoch_path = output_dir / f"{base}.npy"
+            np.save(epoch_path, epoch.astype(np.float32))
+            output_files.append(epoch_path)
+
+            manifest_rows.append(
+                {
+                    "subject_id": run["subject_id"],
+                    "run_id": run["run_id"],
+                    "event_index": int(event_idx),
+                    "stim_id": stim_id,
+                    "audio_file": event_row["audio_file"],
+                    "onset_sec": float(event_row["onset_sec"]),
+                    "offset_sec": float(event_row["offset_sec"]) if pd.notna(event_row.get("offset_sec")) else None,
+                    "epoch_path": _relative_to_root(epoch_path, dataset_root),
+                    "sampling_rate_hz": float(run.get("sampling_rate_hz", np.nan)),
+                    "n_channels": int(run.get("n_channels", data.shape[1])),
+                    "n_samples": int(epoch.shape[0]),
+                    "audio_stem": Path(str(event_row["audio_file"])).stem,
+                }
+            )
+
+    if not manifest_rows:
+        raise ValueError("No epochs were generated; check configuration and event bounds")
+
+    ensure_directory(manifest_out.parent)
+    pd.DataFrame(manifest_rows).to_csv(manifest_out, index=False)
+    logger.info("Saved %d epochs to %s", len(output_files), output_dir)
+    logger.info("Epoch manifest written to %s", manifest_out)
     return output_files
 
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import logging
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 try:  # pragma: no cover - optional dependency
     from huggingface_hub import HfApi, snapshot_download
@@ -107,11 +109,13 @@ def ensure_local_dataset(
 def has_derivatives(root: Path) -> bool:
     """Return True if aligned derivatives appear to be present under ``root``."""
 
-    aligned_dir = root / "derivatives" / "aligned"
-    if not aligned_dir.exists():
+    eeg_dir = root / "derivatives" / "aligned" / "eeg"
+    audio_dir = root / "derivatives" / "aligned" / "audio"
+    if not eeg_dir.exists() or not audio_dir.exists():
         return False
     try:
-        next(aligned_dir.glob("*_EEG_aligned.npy"))
+        next(eeg_dir.glob("*_EEG_aligned.npy"))
+        next(audio_dir.glob("*_Sound_aligned.npy"))
         return True
     except StopIteration:
         return False
@@ -168,6 +172,24 @@ def prepare_derivatives_if_needed(
         )
 
 
+def sanity_check_derivatives(root: Path = LOCAL_DATA_ROOT) -> None:
+    """Perform a light-weight sanity check that HF derivatives exist."""
+
+    epochs_dir = root / "derivatives" / "epochs"
+    aligned_eeg_dir = root / "derivatives" / "aligned" / "eeg"
+    aligned_audio_dir = root / "derivatives" / "aligned" / "audio"
+    manifest_path = root / "manifest_epochs.csv"
+
+    if not epochs_dir.exists() or not any(epochs_dir.glob("*.npy")):
+        raise RuntimeError(f"Missing or empty epochs directory: {epochs_dir}")
+    if not aligned_eeg_dir.exists() or not any(aligned_eeg_dir.glob("*_EEG_aligned.npy")):
+        raise RuntimeError(f"Missing aligned EEG outputs under {aligned_eeg_dir}")
+    if not aligned_audio_dir.exists() or not any(aligned_audio_dir.glob("*_Sound_aligned.npy")):
+        raise RuntimeError(f"Missing aligned audio outputs under {aligned_audio_dir}")
+    if not manifest_path.exists():
+        raise RuntimeError(f"Aligned manifest not found: {manifest_path}")
+
+
 def prepare_data_for_training(
     preproc_config_path: Path | None = None,
     force_preproc: bool = False,
@@ -184,6 +206,20 @@ def prepare_data_for_training(
     return root
 
 
+def run_preprocessing_sanity_check(
+    preproc_config_path: Path | None = DEFAULT_PREPROC_CONFIG,
+    force_download: bool = False,
+) -> None:
+    """Run preprocessing (if needed) and assert core HF derivatives exist."""
+
+    root = prepare_data_for_training(
+        preproc_config_path=preproc_config_path,
+        force_preproc=True,
+        force_download=force_download,
+    )
+    sanity_check_derivatives(root)
+
+
 __all__ = [
     "HF_DATASET_ID",
     "LOCAL_DATA_ROOT",
@@ -194,4 +230,6 @@ __all__ = [
     "has_derivatives",
     "prepare_derivatives_if_needed",
     "prepare_data_for_training",
+    "sanity_check_derivatives",
+    "run_preprocessing_sanity_check",
 ]
