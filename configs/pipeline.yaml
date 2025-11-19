@@ -1,0 +1,51 @@
+log_level: INFO
+
+# 1) EEG 切片
+eeg_epochs:
+  enabled: true
+  output_dir: data/epochs
+  cbyt_dir: data/raw/cbyt
+  cbyt_pattern: "*.CBYT"
+  stimulus_table: data/meta/stimuli.xlsx
+  stimulus_sheet: Sheet1
+  epoch_duration: 4.0
+  anchor: auto
+  resample_hz: 512
+  smoothing_sigma: 0.0
+
+# 2) 伪迹报告
+artifacts:
+  enabled: true
+  epoch_dir: data/epochs
+  output_csv: data/epochs/artifact_report.csv
+  smoothing_sigma: 0.0
+  composite_threshold: 2.0
+
+# 3) 音频特征
+audio_features:
+  enabled: true
+  wav_dir: data/audio
+  output_dir: data/audio_features
+  sampling_rate: 22050
+  frame_length: 0.046
+  hop_length: 0.011
+  n_mfcc: 20
+  fmin: 50.0
+  fmax: null
+  pyin_fmin: 50.0
+  pyin_fmax: 600.0
+
+# 4) EEG/音频对齐
+alignment:
+  enabled: true
+  eeg_epoch_dir: data/epochs
+  artifact_report: data/epochs/artifact_report.csv
+  audio_feature_dir: data/audio_features
+  output_dir: data/aligned
+  eeg_sampling_rate: 512.0
+  eeg_window_ms: 250.0
+  eeg_step_ms: 50.0
+  target_duration: 4.0
+  target_hop: 0.011
+  smoothing_sigma: 0.0
+  missing_policy: warn

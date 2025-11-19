@@ -1,0 +1,18 @@
+log_level: INFO
+# 输入：清洗后的 epoch 与伪迹报告
+eeg_epoch_dir: data/epochs
+artifact_report: data/epochs/artifact_report.csv
+# 输入：音频特征目录
+audio_feature_dir: data/audio_features
+# 输出：对齐后的 EEG/音频矩阵
+output_dir: data/aligned
+# EEG 滑窗配置（毫秒）
+eeg_sampling_rate: 512.0
+eeg_window_ms: 250.0
+eeg_step_ms: 50.0
+# 目标时间网格（秒）
+target_duration: 4.0
+target_hop: 0.011
+# 平滑与缺失策略
+smoothing_sigma: 0.0
+missing_policy: warn

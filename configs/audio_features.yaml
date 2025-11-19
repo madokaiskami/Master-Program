@@ -1,0 +1,15 @@
+log_level: INFO
+# 输入：音频 WAV 目录
+wav_dir: data/audio
+# 输出：特征矩阵与时间戳目录
+output_dir: data/audio_features
+# 采样率与帧配置
+sampling_rate: 22050
+frame_length: 0.046
+hop_length: 0.011
+# 谱与音高特征参数
+n_mfcc: 20
+fmin: 50.0
+fmax: null
+pyin_fmin: 50.0
+pyin_fmax: 600.0

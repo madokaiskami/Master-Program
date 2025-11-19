@@ -1,0 +1,25 @@
+log_level: INFO
+# 目标 epoch 输出目录
+output_dir: data/epochs
+# 目标 epoch 时长（秒）
+epoch_duration: 4.0
+# 自动根据刺激/marker 计算，亦可写 start/end
+anchor: auto
+# CBYT 文件目录及筛选
+cbyt_dir: data/raw/cbyt
+cbyt_pattern: "*.CBYT"
+# 刺激说明表（可为 xlsx/csv）
+stimulus_table: data/meta/stimuli.xlsx
+stimulus_sheet: Sheet1
+stim_sequence_column: Sequence_Number
+stim_wav_column: WAV_Filename
+stim_start_column: Start_Time
+stim_end_column: End_Time
+# 可选 marker 表，若为空则仅依赖刺激表
+marker_table: data/meta/markers.xlsx
+marker_sheet: Sheet1
+marker_start_column: "time of beginning"
+marker_end_column: "time of the end"
+# 可选降采样与平滑
+resample_hz: 512
+smoothing_sigma: 0.0
