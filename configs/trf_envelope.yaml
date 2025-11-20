@@ -1,0 +1,29 @@
+# Envelope-level TRF analysis using HF derivatives
+
+dataset_root: data/hf_eeg_audio
+manifest_path: data/hf_eeg_audio/manifest_epochs.csv
+output_dir: results/trf
+
+# Analysis parameters
+n_mels: 40
+smooth_win: 9
+frame_hz: 90.9
+
+qc:
+  min_frames: 20
+
+roi:
+  enabled: true
+  max_lag_frames: 18
+  top_k: 3
+
+offset:
+  enabled: true
+  candidate_offsets_ms: [0, 33, 55, 88, 121]
+  max_lag_frames: 18
+
+trf:
+  alpha: 10.0
+  n_pre_frames: 18
+  n_post_frames: 36
+  n_splits: 5
