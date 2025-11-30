@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, GridSearchCV
+from sklearn.linear_model import Ridge
 
 from .data import Segment
 from .features import (
+    broadband_envelope,
     build_lagged_features,
-    envelope_from_mel,
-    preprocess_eeg_channel,
+    energy_feature,
+    mel_features_from_sound_matrix,
+    slow_envelope,
     voiced_mask_from_sound,
+    zscore_eeg,
+    highpass_moving_average,
 )
 from .models import TRFConfig, TRFEncoder
 from .offset import shift_sound_forward
@@ -28,22 +34,68 @@ def _prepare_segment_design(
     trf_config: TRFConfig,
     roi_channels: Sequence[int] | None,
     offset_frames: int,
-    n_mels: int,
-    smooth_win: int,
     voicing_cols: Sequence[int],
+    eeg_stats_cache: Dict[Tuple[str, int], Tuple[float, float]],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build design matrix and target for a single segment."""
 
     sound = shift_sound_forward(segment.sound, offset_frames) if offset_frames else segment.sound
-    env = envelope_from_mel(sound, n_mels=n_mels, smooth_win=smooth_win)
+
+    feature_list: List[np.ndarray] = []
+    if "broadband_env" in trf_config.acoustic_features:
+        feature_list.append(
+            broadband_envelope(
+                sound, n_mels=trf_config.mel_n_bands, smooth_win=trf_config.mel_smooth_win
+            )
+        )
+    if "slow_env" in trf_config.acoustic_features:
+        feature_list.append(
+            slow_envelope(
+                sound, n_mels=trf_config.mel_n_bands, smooth_win=max(trf_config.mel_smooth_win, 41)
+            )
+        )
+    if "energy" in trf_config.acoustic_features:
+        feature_list.append(energy_feature(sound, n_mels=trf_config.mel_n_bands))
+    if "mel_multi" in trf_config.acoustic_features:
+        feature_list.append(
+            mel_features_from_sound_matrix(
+                sound,
+                n_mels=trf_config.mel_n_bands,
+                bands="multi",
+                smooth_win=trf_config.mel_smooth_win,
+            )
+        )
+
+    if not feature_list:
+        feature_list.append(
+            mel_features_from_sound_matrix(
+                sound,
+                n_mels=trf_config.mel_n_bands,
+                bands=trf_config.mel_mode,
+                smooth_win=trf_config.mel_smooth_win,
+            )
+        )
+
+    X_seg = np.concatenate(feature_list, axis=1)
     vmask = voiced_mask_from_sound(segment.sound, voicing_cols)
     eeg = segment.eeg[:, roi_channels] if roi_channels else segment.eeg
-    T = min(len(env), eeg.shape[0], len(vmask))
-    env = env[:T]
+    T = min(X_seg.shape[0], eeg.shape[0], len(vmask))
+    X_seg = X_seg[:T]
     eeg = eeg[:T]
     vmask = vmask[:T]
-    X = build_lagged_features(env, n_pre=trf_config.n_pre, n_post=trf_config.n_post, voicing=vmask)
-    ys = [preprocess_eeg_channel(eeg[:, ch]) for ch in range(eeg.shape[1])]
+    X = build_lagged_features(X_seg, n_pre=trf_config.n_pre, n_post=trf_config.n_post, voicing=vmask)
+
+    ys = []
+    for ch in range(eeg.shape[1]):
+        ch_idx = roi_channels[ch] if roi_channels else ch
+        z = zscore_eeg(
+            eeg[:, ch],
+            mode=trf_config.eeg_zscore_mode,
+            subject_id=segment.subject_id,
+            channel_idx=ch_idx,
+            channel_stats_cache=eeg_stats_cache,
+        )
+        ys.append(highpass_moving_average(z, win=trf_config.eeg_highpass_win))
     y = np.mean(np.vstack(ys), axis=0) if ys else np.zeros(T)
     T_use = min(X.shape[0], len(y))
     return X[:T_use], y[:T_use]
@@ -58,8 +110,6 @@ def eval_subject_trf_envelope(
     random_state: int = 42,
     roi_channels: Sequence[int] | None = None,
     offset_frames: int = 0,
-    n_mels: int = 40,
-    smooth_win: int = 9,
     voicing_cols: Sequence[int] | None = None,
 ) -> Dict[str, Any]:
     """Evaluate an envelope-level TRF model for a single subject."""
@@ -71,15 +121,15 @@ def eval_subject_trf_envelope(
         return {"subject_id": subject_id, "note": "no segments"}
 
     voicing_cols = voicing_cols or []
+    eeg_stats_cache: Dict[Tuple[str, int], Tuple[float, float]] = {}
     per_segment_Xy = [
         _prepare_segment_design(
             seg,
             trf_config=trf_config,
             roi_channels=roi_channels,
             offset_frames=offset_frames,
-            n_mels=n_mels,
-            smooth_win=smooth_win,
             voicing_cols=voicing_cols,
+            eeg_stats_cache=eeg_stats_cache,
         )
         for seg in subject_segments
     ]
@@ -105,6 +155,30 @@ def eval_subject_trf_envelope(
         ycat = np.concatenate(ys)
         return Xcat, ycat
 
+    tuned_config = trf_config
+    if trf_config.ridge_alpha_grid:
+        Xall, yall = _concat(range(len(per_segment_Xy)))
+        mu, sd = Xall.mean(axis=0), Xall.std(axis=0)
+        sd[sd == 0] = 1.0
+        Xall_std = (Xall - mu) / sd
+        y_mu, y_sd = yall.mean(), yall.std()
+        yall_std = (yall - y_mu) / (y_sd if y_sd > 0 else 1.0)
+
+        groups_all = np.concatenate([np.full(len(p[1]), idx) for idx, p in enumerate(per_segment_Xy)])
+        cv_folds = min(trf_config.ridge_cv_folds, len(np.unique(groups_all)))
+        if cv_folds < 2:
+            best_alpha = trf_config.ridge_alpha
+        else:
+            tuner = GridSearchCV(
+                Ridge(),
+                param_grid={"alpha": list(trf_config.ridge_alpha_grid)},
+                cv=GroupKFold(n_splits=cv_folds),
+                scoring="neg_mean_squared_error",
+            )
+            tuner.fit(Xall_std, yall_std, groups=groups_all)
+            best_alpha = float(tuner.best_params_.get("alpha", trf_config.ridge_alpha))
+        tuned_config = replace(trf_config, ridge_alpha=best_alpha, ridge_alpha_grid=None)
+
     if splitter:
         for tr_idx, va_idx in splitter.split(np.zeros(len(groups)), groups=groups):
             Xtr, ytr = _concat(tr_idx)
@@ -114,7 +188,7 @@ def eval_subject_trf_envelope(
             y_mu, y_sd = ytr.mean(), ytr.std()
             ytr_std = (ytr - y_mu) / (y_sd if y_sd > 0 else 1.0)
 
-            model = TRFEncoder(trf_config)
+            model = TRFEncoder(tuned_config)
             model.fit(Xtr_std, ytr_std.reshape(-1, 1))
 
             for idx in va_idx:
@@ -132,7 +206,7 @@ def eval_subject_trf_envelope(
             preds_tr = model.predict(Xtr_std).reshape(-1)
             r2_scores.append(float(r2_score(ytr_std, preds_tr)))
             ytr_perm = rng.permutation(ytr_std)
-            null_model = TRFEncoder(trf_config)
+            null_model = TRFEncoder(tuned_config)
             null_model.fit(Xtr_std, ytr_perm.reshape(-1, 1))
             null_preds = null_model.predict(Xtr_std).reshape(-1)
             null_r2_scores.append(float(r2_score(ytr_std, null_preds)))
@@ -143,7 +217,7 @@ def eval_subject_trf_envelope(
         Xall_std = (Xall - mu) / sd
         y_mu, y_sd = yall.mean(), yall.std()
         yall_std = (yall - y_mu) / (y_sd if y_sd > 0 else 1.0)
-        model = TRFEncoder(trf_config)
+        model = TRFEncoder(tuned_config)
         model.fit(Xall_std, yall_std.reshape(-1, 1))
         preds = model.predict(Xall_std).reshape(-1)
         if np.std(yall_std) > 0 and np.std(preds) > 0:
@@ -154,7 +228,7 @@ def eval_subject_trf_envelope(
             seg_corrs_null.append(float(np.corrcoef(yperm, preds)[0, 1]))
         r2_scores.append(float(r2_score(yall_std, preds)))
         yperm_glob = rng.permutation(yall_std)
-        null_model = TRFEncoder(trf_config)
+        null_model = TRFEncoder(tuned_config)
         null_model.fit(Xall_std, yperm_glob.reshape(-1, 1))
         null_preds = null_model.predict(Xall_std).reshape(-1)
         null_r2_scores.append(float(r2_score(yall_std, null_preds)))
@@ -183,8 +257,6 @@ def run_trf_analysis_per_subject(
     n_splits: int = 5,
     roi_map: Mapping[str, Sequence[int]] | None = None,
     offset_map: Mapping[str, int] | None = None,
-    n_mels: int = 40,
-    smooth_win: int = 9,
     voicing_cols: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     """Run TRF evaluation for each subject and collect a summary DataFrame."""
@@ -199,8 +271,6 @@ def run_trf_analysis_per_subject(
             n_splits=n_splits,
             roi_channels=roi_map.get(sid) if roi_map else None,
             offset_frames=offset_map.get(sid, 0) if offset_map else 0,
-            n_mels=n_mels,
-            smooth_win=smooth_win,
             voicing_cols=voicing_cols,
         )
         results.append(res)
