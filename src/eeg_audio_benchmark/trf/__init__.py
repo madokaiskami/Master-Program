@@ -5,8 +5,10 @@ from .eval import eval_subject_trf_envelope, run_trf_analysis_per_subject
 from .features import (
     build_lagged_features,
     causal_moving_average,
-    envelope_for_segments,
-    envelope_from_sound_matrix,
+    mel_features_from_sound_matrix,
+    broadband_envelope,
+    slow_envelope,
+    energy_feature,
 )
 from .models import TRFConfig, TRFEncoder
 from .offset import (
@@ -27,8 +29,10 @@ __all__ = [
     "run_trf_analysis_per_subject",
     "build_lagged_features",
     "causal_moving_average",
-    "envelope_for_segments",
-    "envelope_from_sound_matrix",
+    "mel_features_from_sound_matrix",
+    "broadband_envelope",
+    "slow_envelope",
+    "energy_feature",
     "TRFConfig",
     "TRFEncoder",
     "pick_best_global_offset",

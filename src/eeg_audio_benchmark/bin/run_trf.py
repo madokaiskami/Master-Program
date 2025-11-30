@@ -69,6 +69,8 @@ def _collect_roi_channels(
     roi_config: Dict[str, object],
     n_mels: int,
     smooth_win: int,
+    eeg_highpass_win: int,
+    eeg_zscore_mode: str,
     voicing_cols: Sequence[int],
 ) -> Dict[str, Sequence[int]]:
     roi_map: Dict[str, Sequence[int]] = {}
@@ -80,6 +82,8 @@ def _collect_roi_channels(
             top_k=int(roi_config.get("top_k", 3)),
             n_mels=n_mels,
             smooth_win=smooth_win,
+            eeg_highpass_win=eeg_highpass_win,
+            eeg_zscore_mode=eeg_zscore_mode,
             voicing_cols=voicing_cols,
         )
         roi_map[sid] = roi
@@ -94,6 +98,8 @@ def _collect_offsets(
     frame_hz: float,
     n_mels: int,
     smooth_win: int,
+    eeg_highpass_win: int,
+    eeg_zscore_mode: str,
     voicing_cols: Sequence[int],
 ) -> Dict[str, int]:
     offsets_ms = offset_config.get("candidate_offsets_ms", [])
@@ -110,6 +116,8 @@ def _collect_offsets(
             max_lag_frames=max_lag_frames,
             n_mels=n_mels,
             smooth_win=smooth_win,
+            eeg_highpass_win=eeg_highpass_win,
+            eeg_zscore_mode=eeg_zscore_mode,
             voicing_cols=voicing_cols,
         )
     return offset_map
@@ -136,15 +144,24 @@ def main() -> None:
     nan_inf_report(segments)
 
     subject_ids = sorted({s.subject_id for s in segments})
-    n_mels = int(config_dict.get("n_mels", 40))
-    smooth_win = int(config_dict.get("smooth_win", 9))
+    trf_section = config_dict.get("trf", {}) if isinstance(config_dict.get("trf", {}), dict) else {}
+    n_mels = int(trf_section.get("mel_n_bands", config_dict.get("n_mels", 40)))
+    smooth_win = int(trf_section.get("mel_smooth_win", config_dict.get("smooth_win", 9)))
+    mel_mode = str(trf_section.get("mel_mode", "envelope"))
     voicing_cols = list(config_dict.get("voicing_cols", []))
 
     roi_map: Dict[str, Sequence[int]] = {}
     roi_config = config_dict.get("roi", {}) if isinstance(config_dict.get("roi", {}), dict) else {}
     if roi_config.get("enabled", False):
         roi_map = _collect_roi_channels(
-            segments, subject_ids, roi_config, n_mels=n_mels, smooth_win=smooth_win, voicing_cols=voicing_cols
+            segments,
+            subject_ids,
+            roi_config,
+            n_mels=n_mels,
+            smooth_win=smooth_win,
+            eeg_highpass_win=int(trf_section.get("eeg_highpass_win", 15)),
+            eeg_zscore_mode=str(trf_section.get("eeg_zscore_mode", "per_segment_channel")),
+            voicing_cols=voicing_cols,
         )
 
     offset_map: Dict[str, int] = {}
@@ -159,14 +176,23 @@ def main() -> None:
             frame_hz=frame_hz,
             n_mels=n_mels,
             smooth_win=smooth_win,
+            eeg_highpass_win=int(trf_section.get("eeg_highpass_win", 15)),
+            eeg_zscore_mode=str(trf_section.get("eeg_zscore_mode", "per_segment_channel")),
             voicing_cols=voicing_cols,
         )
 
-    trf_section = config_dict.get("trf", {}) if isinstance(config_dict.get("trf", {}), dict) else {}
     trf_config = TRFConfig(
-        alpha=float(trf_section.get("alpha", 1.0)),
+        ridge_alpha=float(trf_section.get("ridge_alpha", trf_section.get("alpha", 1.0))),
+        ridge_alpha_grid=trf_section.get("ridge_alpha_grid"),
+        ridge_cv_folds=int(trf_section.get("ridge_cv_folds", 3)),
         n_pre=int(trf_section.get("n_pre_frames", trf_section.get("n_pre", 5))),
         n_post=int(trf_section.get("n_post_frames", trf_section.get("n_post", 10))),
+        mel_n_bands=n_mels,
+        mel_mode=mel_mode,
+        mel_smooth_win=smooth_win,
+        acoustic_features=list(trf_section.get("acoustic_features", ["broadband_env"])),
+        eeg_highpass_win=int(trf_section.get("eeg_highpass_win", 15)),
+        eeg_zscore_mode=str(trf_section.get("eeg_zscore_mode", "per_segment_channel")),
     )
     n_splits = int(trf_section.get("n_splits", 5))
 
@@ -176,8 +202,6 @@ def main() -> None:
         n_splits=n_splits,
         roi_map=roi_map,
         offset_map=offset_map,
-        n_mels=n_mels,
-        smooth_win=smooth_win,
         voicing_cols=voicing_cols,
     )
 

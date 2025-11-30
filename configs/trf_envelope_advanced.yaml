@@ -1,0 +1,40 @@
+# Advanced TRF analysis with multi-band mel features and tuned ridge regularization
+
+dataset_root: data/hf_eeg_audio
+manifest_path: data/hf_eeg_audio/manifest_epochs.csv
+output_dir: results/trf
+
+# Analysis parameters
+frame_hz: 90.9
+qc:
+  min_frames: 20
+
+roi:
+  enabled: true
+  max_lag_frames: 18
+  top_k: 3
+
+offset:
+  enabled: true
+  candidate_offsets_ms: [0, 33, 55, 88, 121]
+  max_lag_frames: 18
+
+trf:
+  n_pre_frames: 18
+  n_post_frames: 36
+  mel_n_bands: 40
+  mel_mode: "multi"
+  mel_smooth_win: 9
+
+  acoustic_features:
+    - "broadband_env"
+    - "slow_env"
+    - "mel_multi"
+
+  ridge_alpha: 1.0
+  ridge_alpha_grid: [0.1, 1.0, 10.0]
+  ridge_cv_folds: 3
+
+  eeg_highpass_win: 21
+  eeg_zscore_mode: "per_subject_channel"
+  n_splits: 5

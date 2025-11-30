@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Sequence
+from typing import Dict, Sequence, Tuple
 
 import numpy as np
 
 from .data import Segment
-from .features import envelope_from_mel, preprocess_eeg_channel, voiced_mask_from_sound
+from .features import (
+    broadband_envelope,
+    highpass_moving_average,
+    voiced_mask_from_sound,
+    zscore_eeg,
+)
 from .roi import channel_envelope_max_correlation
 
 logger = logging.getLogger(__name__)
@@ -32,11 +37,14 @@ def _segment_roi_score(
     max_lag_frames: int,
     n_mels: int,
     smooth_win: int,
+    eeg_highpass_win: int,
+    eeg_zscore_mode: str,
+    stats_cache: Dict[Tuple[str, int], Tuple[float, float]],
     shift_frames: int,
     voicing_cols: Sequence[int],
 ) -> float:
     sound = shift_sound_forward(segment.sound, shift_frames) if shift_frames else segment.sound
-    env = envelope_from_mel(sound, n_mels=n_mels, smooth_win=smooth_win)
+    env = broadband_envelope(sound, n_mels=n_mels, smooth_win=smooth_win)[:, 0]
     vmask = voiced_mask_from_sound(segment.sound, voicing_cols)
     T = min(segment.eeg.shape[0], env.shape[0], len(vmask))
     env = env[:T]
@@ -44,7 +52,15 @@ def _segment_roi_score(
     eeg = segment.eeg[:T, roi_channels]
     per_channel = []
     for idx in range(eeg.shape[1]):
-        y = preprocess_eeg_channel(eeg[:, idx])
+        channel_idx = roi_channels[idx]
+        z = zscore_eeg(
+            eeg[:, idx],
+            mode=eeg_zscore_mode,
+            subject_id=segment.subject_id,
+            channel_idx=channel_idx,
+            channel_stats_cache=stats_cache,
+        )
+        y = highpass_moving_average(z, win=eeg_highpass_win)
         per_channel.append(
             channel_envelope_max_correlation(y, env, max_lag_frames=max_lag_frames, mask=mask_use)
         )
@@ -60,12 +76,15 @@ def score_offset_for_roi(
     max_lag_frames: int,
     n_mels: int = 40,
     smooth_win: int = 9,
+    eeg_highpass_win: int = 15,
+    eeg_zscore_mode: str = "per_segment_channel",
     voicing_cols: Sequence[int] | None = None,
 ) -> Dict[int, float]:
     """Return a mapping from offset (frames) to ROI correlation score."""
 
     subject_segments = [s for s in segments if s.subject_id == subject_id]
     scores: Dict[int, float] = {}
+    stats_cache: Dict[Tuple[str, int], Tuple[float, float]] = {}
     for off in candidate_offsets_frames:
         per_seg = [
             _segment_roi_score(
@@ -74,6 +93,9 @@ def score_offset_for_roi(
                 max_lag_frames,
                 n_mels=n_mels,
                 smooth_win=smooth_win,
+                eeg_highpass_win=eeg_highpass_win,
+                eeg_zscore_mode=eeg_zscore_mode,
+                stats_cache=stats_cache,
                 shift_frames=off,
                 voicing_cols=voicing_cols or [],
             )
@@ -91,6 +113,8 @@ def pick_best_global_offset(
     max_lag_frames: int,
     n_mels: int = 40,
     smooth_win: int = 9,
+    eeg_highpass_win: int = 15,
+    eeg_zscore_mode: str = "per_segment_channel",
     voicing_cols: Sequence[int] | None = None,
 ) -> int:
     """Pick the best global offset; ties broken by smaller absolute offset."""
@@ -103,6 +127,8 @@ def pick_best_global_offset(
         max_lag_frames,
         n_mels=n_mels,
         smooth_win=smooth_win,
+        eeg_highpass_win=eeg_highpass_win,
+        eeg_zscore_mode=eeg_zscore_mode,
         voicing_cols=voicing_cols,
     )
     if not scores:

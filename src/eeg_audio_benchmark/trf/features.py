@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -30,59 +30,73 @@ def causal_moving_average(x: np.ndarray, win: int = 9) -> np.ndarray:
     return (out - mu) / (sd if sd > 0 else 1.0)
 
 
-def envelope_from_mel(S: np.ndarray, n_mels: int = 40, smooth_win: int = 9) -> np.ndarray:
-    """Construct a broadband envelope from mel-band features.
+def mel_features_from_sound_matrix(
+    S: np.ndarray,
+    n_mels: int = 40,
+    bands: str = "multi",
+    smooth_win: int = 9,
+) -> np.ndarray:
+    """Construct mel-derived acoustic features.
 
-    Steps (matching the notebooks):
-    1. Take the first ``n_mels`` bands.
-    2. Compute the L2 norm across bands per frame.
-    3. Z-score the envelope.
-    4. Apply causal moving-average smoothing.
+    Parameters
+    ----------
+    S:
+        Input sound matrix of shape (T, D).
+    n_mels:
+        Number of mel bands to keep (first ``n_mels`` columns).
+    bands:
+        "multi" for band-wise features, "envelope" for broadband envelope.
+    smooth_win:
+        Optional causal smoothing window applied per band (``multi``) or to the
+        broadband envelope (``envelope``) to mirror notebook behavior.
     """
 
     S = np.asarray(S, dtype=np.float64)
     mel = S[:, : min(n_mels, S.shape[1])]
+    if bands == "envelope":
+        env = np.sqrt((mel**2).sum(axis=1))
+        mu, sd = env.mean(), env.std()
+        env = (env - mu) / (sd if sd > 0 else 1.0)
+        if smooth_win and smooth_win > 1:
+            env = causal_moving_average(env, win=smooth_win)
+        return env.reshape(-1, 1)
+
+    # Multi-band: z-score each band and optionally apply causal smoothing
+    mu = mel.mean(axis=0)
+    sd = mel.std(axis=0)
+    sd[sd == 0] = 1.0
+    feats = (mel - mu) / sd
+    if smooth_win and smooth_win > 1:
+        feats = np.vstack([causal_moving_average(feats[:, i], win=smooth_win) for i in range(feats.shape[1])]).T
+    return feats
+
+
+def broadband_envelope(S: np.ndarray, n_mels: int = 40, smooth_win: int = 9) -> np.ndarray:
+    """Broadband envelope constructed from mel bands with causal smoothing."""
+
+    mel = mel_features_from_sound_matrix(S, n_mels=n_mels, bands="multi", smooth_win=0)
     env = np.sqrt((mel**2).sum(axis=1))
     mu, sd = env.mean(), env.std()
     env = (env - mu) / (sd if sd > 0 else 1.0)
     if smooth_win and smooth_win > 1:
         env = causal_moving_average(env, win=smooth_win)
-    return env
+    return env.reshape(-1, 1)
 
 
-def envelope_from_sound_matrix(
-    S: np.ndarray,
-    use_rms_column: int | None = None,
-    n_mels: int = 40,
-    smooth_win: int = 9,
-) -> np.ndarray:
-    """Extract or construct a broadband envelope from an audio feature matrix."""
+def slow_envelope(S: np.ndarray, n_mels: int = 40, smooth_win: int = 41) -> np.ndarray:
+    """Slowly varying broadband envelope using a long smoothing window."""
 
-    if use_rms_column is not None and 0 <= use_rms_column < S.shape[1]:
-        env = np.asarray(S[:, use_rms_column], dtype=np.float64)
-        mu, sd = env.mean(), env.std()
-        env = (env - mu) / (sd if sd > 0 else 1.0)
-    else:
-        env = envelope_from_mel(S, n_mels=n_mels, smooth_win=smooth_win)
-    return env
+    return broadband_envelope(S, n_mels=n_mels, smooth_win=smooth_win)
 
 
-def envelope_for_segments(
-    segments: List[Segment],
-    n_mels: int = 40,
-    smooth_win: int = 9,
-    use_rms_column: int | None = None,
-) -> List[np.ndarray]:
-    """Construct envelopes for a list of segments."""
+def energy_feature(S: np.ndarray, n_mels: int = 40) -> np.ndarray:
+    """Frame-level energy across mel bands (mean energy per frame)."""
 
-    envelopes: List[np.ndarray] = []
-    for seg in segments:
-        envelopes.append(
-            envelope_from_sound_matrix(
-                seg.sound, use_rms_column=use_rms_column, n_mels=n_mels, smooth_win=smooth_win
-            )
-        )
-    return envelopes
+    mel = mel_features_from_sound_matrix(S, n_mels=n_mels, bands="multi", smooth_win=0)
+    energy = mel.mean(axis=1)
+    mu, sd = energy.mean(), energy.std()
+    energy = (energy - mu) / (sd if sd > 0 else 1.0)
+    return energy.reshape(-1, 1)
 
 
 def voiced_mask_from_sound(S: np.ndarray, voicing_cols: Sequence[int], threshold: float = 0.5) -> np.ndarray:
@@ -106,10 +120,10 @@ def voiced_mask_from_sound(S: np.ndarray, voicing_cols: Sequence[int], threshold
 
 
 def highpass_moving_average(y: np.ndarray, win: int = 15) -> np.ndarray:
-    """Moving-average high-pass filter used for EEG in the notebooks."""
+    """Causal moving-average high-pass filter used for EEG channels."""
 
     y = np.asarray(y, dtype=np.float64)
-    if y.size == 0:
+    if y.size == 0 or win <= 1:
         return y
     if y.size < 2 * win:
         mu, sd = y.mean(), y.std()
@@ -121,32 +135,67 @@ def highpass_moving_average(y: np.ndarray, win: int = 15) -> np.ndarray:
     return (hp - mu) / (sd if sd > 0 else 1.0)
 
 
-def preprocess_eeg_channel(y: np.ndarray, highpass_win: int = 15) -> np.ndarray:
-    """Z-score and high-pass filter a single EEG channel."""
+def zscore_eeg(
+    eeg: np.ndarray,
+    mode: str,
+    subject_id: str,
+    channel_idx: int,
+    channel_stats_cache: Dict[Tuple[str, int], Tuple[float, float]],
+) -> np.ndarray:
+    """Z-score EEG according to the requested mode.
 
-    y = np.asarray(y, dtype=np.float64)
-    mu, sd = y.mean(), y.std()
-    y = (y - mu) / (sd if sd > 0 else 1.0)
-    return highpass_moving_average(y, win=highpass_win)
-
-
-def build_lagged_features(env: np.ndarray, n_pre: int, n_post: int, voicing: np.ndarray | None = None) -> np.ndarray:
-    """Build lagged features from an envelope vector (optionally with voicing).
-
-    Lags run from ``-n_pre`` (past) to ``+n_post`` (future) inclusive, matching
-    the "build_lagged_design" helper in the notebooks.
+    Parameters
+    ----------
+    eeg:
+        Array of shape (T,) for a single channel.
+    mode:
+        "per_subject_channel" uses cached stats across all segments per subject
+        and channel. "per_segment_channel" computes stats independently per
+        segment.
+    subject_id:
+        Subject identifier for cache keying.
+    channel_stats_cache:
+        Mutable cache mapping ``(subject_id, channel_idx)`` to ``(mean, std)``.
     """
 
-    if env.ndim != 1:
-        raise ValueError("Envelope must be a 1D array")
+    eeg = np.asarray(eeg, dtype=np.float64)
+    if eeg.size == 0:
+        return eeg
+    if mode == "per_subject_channel":
+        key = (subject_id, int(channel_idx))
+        if key not in channel_stats_cache:
+            mu, sd = eeg.mean(), eeg.std()
+            channel_stats_cache[key] = (mu, sd if sd > 0 else 1.0)
+        mu, sd = channel_stats_cache[key]
+    else:
+        mu, sd = eeg.mean(), eeg.std()
+        sd = sd if sd > 0 else 1.0
+    return (eeg - mu) / sd
+
+
+def build_lagged_features(
+    features: np.ndarray, n_pre: int, n_post: int, voicing: np.ndarray | None = None
+) -> np.ndarray:
+    """Build lagged features from acoustic inputs (optionally with voicing).
+
+    Lags run from ``-n_pre`` (past) to ``+n_post`` (future) inclusive. For
+    multi-dimensional acoustic inputs, lags are tiled per feature dimension in
+    column-major order.
+    """
+
+    if features.ndim != 2:
+        raise ValueError("Features must be a 2D array (T, D)")
     lags = list(range(-n_pre, n_post + 1))
-    T = env.shape[0]
-    X = np.zeros((T, len(lags)), dtype=np.float64)
-    for i, lag in enumerate(lags):
-        if lag >= 0:
-            X[lag:, i] = env[: T - lag]
-        else:
-            X[: T + lag, i] = env[-lag:]
+    T, D = features.shape
+    X = np.zeros((T, len(lags) * D), dtype=np.float64)
+    for j in range(D):
+        env = features[:, j]
+        for i, lag in enumerate(lags):
+            col = j * len(lags) + i
+            if lag >= 0:
+                X[lag:, col] = env[: T - lag]
+            else:
+                X[: T + lag, col] = env[-lag:]
     if voicing is None:
         return X
     v = np.asarray(voicing, dtype=np.float64).reshape(-1)
@@ -157,10 +206,11 @@ def build_lagged_features(env: np.ndarray, n_pre: int, n_post: int, voicing: np.
 __all__ = [
     "build_lagged_features",
     "causal_moving_average",
-    "envelope_from_mel",
-    "envelope_for_segments",
-    "envelope_from_sound_matrix",
+    "mel_features_from_sound_matrix",
+    "broadband_envelope",
+    "slow_envelope",
+    "energy_feature",
     "highpass_moving_average",
-    "preprocess_eeg_channel",
+    "zscore_eeg",
     "voiced_mask_from_sound",
 ]
