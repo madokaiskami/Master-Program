@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,38 +11,42 @@ from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupKFold
 
 from .data import Segment
-from .features import build_lagged_features, envelope_from_sound_matrix
+from .features import (
+    build_lagged_features,
+    envelope_from_mel,
+    preprocess_eeg_channel,
+    voiced_mask_from_sound,
+)
 from .models import TRFConfig, TRFEncoder
 from .offset import shift_sound_forward
 
 logger = logging.getLogger(__name__)
 
 
-def _build_design_matrices(
-    segments: Iterable[Segment],
+def _prepare_segment_design(
+    segment: Segment,
     trf_config: TRFConfig,
     roi_channels: Sequence[int] | None,
     offset_frames: int,
     n_mels: int,
     smooth_win: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    X_list: List[np.ndarray] = []
-    Y_list: List[np.ndarray] = []
-    groups: List[np.ndarray] = []
-    for idx, seg in enumerate(segments):
-        sound = shift_sound_forward(seg.sound, offset_frames) if offset_frames else seg.sound
-        env = envelope_from_sound_matrix(sound, n_mels=n_mels, smooth_win=smooth_win)
-        X_seg = build_lagged_features(env, n_pre=trf_config.n_pre, n_post=trf_config.n_post)
-        eeg = seg.eeg[:, roi_channels] if roi_channels else seg.eeg
-        T = min(X_seg.shape[0], eeg.shape[0])
-        if T == 0:
-            continue
-        X_list.append(X_seg[:T])
-        Y_list.append(eeg[:T])
-        groups.append(np.full(T, idx, dtype=int))
-    if not X_list:
-        return np.empty((0, trf_config.n_pre + trf_config.n_post + 1)), np.empty((0, 0)), np.empty(0)
-    return np.vstack(X_list), np.vstack(Y_list), np.concatenate(groups)
+    voicing_cols: Sequence[int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build design matrix and target for a single segment."""
+
+    sound = shift_sound_forward(segment.sound, offset_frames) if offset_frames else segment.sound
+    env = envelope_from_mel(sound, n_mels=n_mels, smooth_win=smooth_win)
+    vmask = voiced_mask_from_sound(segment.sound, voicing_cols)
+    eeg = segment.eeg[:, roi_channels] if roi_channels else segment.eeg
+    T = min(len(env), eeg.shape[0], len(vmask))
+    env = env[:T]
+    eeg = eeg[:T]
+    vmask = vmask[:T]
+    X = build_lagged_features(env, n_pre=trf_config.n_pre, n_post=trf_config.n_post, voicing=vmask)
+    ys = [preprocess_eeg_channel(eeg[:, ch]) for ch in range(eeg.shape[1])]
+    y = np.mean(np.vstack(ys), axis=0) if ys else np.zeros(T)
+    T_use = min(X.shape[0], len(y))
+    return X[:T_use], y[:T_use]
 
 
 def eval_subject_trf_envelope(
@@ -56,70 +60,117 @@ def eval_subject_trf_envelope(
     offset_frames: int = 0,
     n_mels: int = 40,
     smooth_win: int = 9,
+    voicing_cols: Sequence[int] | None = None,
 ) -> Dict[str, Any]:
     """Evaluate an envelope-level TRF model for a single subject."""
 
     subject_segments = [s for s in segments if s.subject_id == subject_id]
     if max_segments is not None:
         subject_segments = subject_segments[:max_segments]
-    X, Y, groups = _build_design_matrices(
-        subject_segments,
-        trf_config=trf_config,
-        roi_channels=roi_channels,
-        offset_frames=offset_frames,
-        n_mels=n_mels,
-        smooth_win=smooth_win,
-    )
-    if X.size == 0 or Y.size == 0:
+    if not subject_segments:
+        return {"subject_id": subject_id, "note": "no segments"}
+
+    voicing_cols = voicing_cols or []
+    per_segment_Xy = [
+        _prepare_segment_design(
+            seg,
+            trf_config=trf_config,
+            roi_channels=roi_channels,
+            offset_frames=offset_frames,
+            n_mels=n_mels,
+            smooth_win=smooth_win,
+            voicing_cols=voicing_cols,
+        )
+        for seg in subject_segments
+    ]
+    per_segment_Xy = [(X, y) for X, y in per_segment_Xy if X.size and y.size]
+    if not per_segment_Xy:
         logger.warning("No data available for subject %s", subject_id)
         return {"subject_id": subject_id, "mean_r2": np.nan, "null_mean_r2": np.nan, "r2_per_channel": []}
 
-    n_groups = len(np.unique(groups))
-    n_splits = min(n_splits, n_groups) if n_groups > 1 else 1
-    if n_splits < 1:
-        n_splits = 1
-    splitter = GroupKFold(n_splits=n_splits) if n_splits > 1 else None
+    groups = np.arange(len(per_segment_Xy))
+    n_groups = len(groups)
+    n_splits_use = min(n_splits, n_groups) if n_groups > 1 else 1
+    splitter = GroupKFold(n_splits=n_splits_use) if n_splits_use > 1 else None
 
     rng = np.random.default_rng(random_state)
-    r2_scores: List[np.ndarray] = []
-    null_scores: List[np.ndarray] = []
+    seg_corrs: List[float] = []
+    seg_corrs_null: List[float] = []
+    r2_scores: List[float] = []
+    null_r2_scores: List[float] = []
+
+    def _concat(idx_list: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+        Xs, ys = zip(*[per_segment_Xy[i] for i in idx_list])
+        Xcat = np.vstack(Xs)
+        ycat = np.concatenate(ys)
+        return Xcat, ycat
 
     if splitter:
-        for train_idx, test_idx in splitter.split(X, Y, groups):
+        for tr_idx, va_idx in splitter.split(np.zeros(len(groups)), groups=groups):
+            Xtr, ytr = _concat(tr_idx)
+            mu, sd = Xtr.mean(axis=0), Xtr.std(axis=0)
+            sd[sd == 0] = 1.0
+            Xtr_std = (Xtr - mu) / sd
+            y_mu, y_sd = ytr.mean(), ytr.std()
+            ytr_std = (ytr - y_mu) / (y_sd if y_sd > 0 else 1.0)
+
             model = TRFEncoder(trf_config)
-            model.fit(X[train_idx], Y[train_idx])
-            preds = model.predict(X[test_idx])
-            r2 = r2_score(Y[test_idx], preds, multioutput="raw_values")
-            r2_scores.append(r2)
+            model.fit(Xtr_std, ytr_std.reshape(-1, 1))
 
-            shuffled = rng.permutation(Y[train_idx])
+            for idx in va_idx:
+                Xv, yv = per_segment_Xy[idx]
+                Xv_std = (Xv - mu) / sd
+                yv_std = (yv - y_mu) / (y_sd if y_sd > 0 else 1.0)
+                pred = model.predict(Xv_std).reshape(-1)
+                if np.std(yv_std) > 0 and np.std(pred) > 0:
+                    seg_corrs.append(float(np.corrcoef(yv_std, pred)[0, 1]))
+                shift = max(1, int(0.33 * len(yv_std)))
+                yperm = np.roll(yv_std, shift)
+                if np.std(yperm) > 0 and np.std(pred) > 0:
+                    seg_corrs_null.append(float(np.corrcoef(yperm, pred)[0, 1]))
+
+            preds_tr = model.predict(Xtr_std).reshape(-1)
+            r2_scores.append(float(r2_score(ytr_std, preds_tr)))
+            ytr_perm = rng.permutation(ytr_std)
             null_model = TRFEncoder(trf_config)
-            null_model.fit(X[train_idx], shuffled)
-            null_preds = null_model.predict(X[test_idx])
-            null_r2 = r2_score(Y[test_idx], null_preds, multioutput="raw_values")
-            null_scores.append(null_r2)
+            null_model.fit(Xtr_std, ytr_perm.reshape(-1, 1))
+            null_preds = null_model.predict(Xtr_std).reshape(-1)
+            null_r2_scores.append(float(r2_score(ytr_std, null_preds)))
     else:
+        Xall, yall = _concat(range(len(per_segment_Xy)))
+        mu, sd = Xall.mean(axis=0), Xall.std(axis=0)
+        sd[sd == 0] = 1.0
+        Xall_std = (Xall - mu) / sd
+        y_mu, y_sd = yall.mean(), yall.std()
+        yall_std = (yall - y_mu) / (y_sd if y_sd > 0 else 1.0)
         model = TRFEncoder(trf_config)
-        model.fit(X, Y)
-        preds = model.predict(X)
-        r2_scores.append(r2_score(Y, preds, multioutput="raw_values"))
-        shuffled = rng.permutation(Y)
+        model.fit(Xall_std, yall_std.reshape(-1, 1))
+        preds = model.predict(Xall_std).reshape(-1)
+        if np.std(yall_std) > 0 and np.std(preds) > 0:
+            seg_corrs.append(float(np.corrcoef(yall_std, preds)[0, 1]))
+        shift = max(1, int(0.33 * len(yall_std)))
+        yperm = np.roll(yall_std, shift)
+        if np.std(yperm) > 0 and np.std(preds) > 0:
+            seg_corrs_null.append(float(np.corrcoef(yperm, preds)[0, 1]))
+        r2_scores.append(float(r2_score(yall_std, preds)))
+        yperm_glob = rng.permutation(yall_std)
         null_model = TRFEncoder(trf_config)
-        null_model.fit(X, shuffled)
-        null_preds = null_model.predict(X)
-        null_scores.append(r2_score(Y, null_preds, multioutput="raw_values"))
+        null_model.fit(Xall_std, yperm_glob.reshape(-1, 1))
+        null_preds = null_model.predict(Xall_std).reshape(-1)
+        null_r2_scores.append(float(r2_score(yall_std, null_preds)))
 
-    r2_array = np.vstack(r2_scores)
-    null_array = np.vstack(null_scores)
-    mean_r2 = float(np.nanmean(r2_array))
-    null_mean_r2 = float(np.nanmean(null_array))
+    median_pred_r = float(np.nanmedian(seg_corrs)) if len(seg_corrs) else np.nan
+    median_pred_r_null = float(np.nanmedian(seg_corrs_null)) if len(seg_corrs_null) else np.nan
+    mean_r2 = float(np.nanmean(r2_scores)) if len(r2_scores) else np.nan
+    null_mean_r2 = float(np.nanmean(null_r2_scores)) if len(null_r2_scores) else np.nan
 
     return {
         "subject_id": subject_id,
         "mean_r2": mean_r2,
         "null_mean_r2": null_mean_r2,
-        "r2_per_channel": r2_array.tolist(),
-        "n_splits": n_splits,
+        "median_pred_r": median_pred_r,
+        "median_pred_r_null": median_pred_r_null,
+        "n_splits": n_splits_use,
         "n_segments": len(subject_segments),
         "offset_frames": offset_frames,
         "roi_channels": list(roi_channels) if roi_channels else None,
@@ -134,6 +185,7 @@ def run_trf_analysis_per_subject(
     offset_map: Mapping[str, int] | None = None,
     n_mels: int = 40,
     smooth_win: int = 9,
+    voicing_cols: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     """Run TRF evaluation for each subject and collect a summary DataFrame."""
 
@@ -149,6 +201,7 @@ def run_trf_analysis_per_subject(
             offset_frames=offset_map.get(sid, 0) if offset_map else 0,
             n_mels=n_mels,
             smooth_win=smooth_win,
+            voicing_cols=voicing_cols,
         )
         results.append(res)
     return pd.DataFrame(results)
