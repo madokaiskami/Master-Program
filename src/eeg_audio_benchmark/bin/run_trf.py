@@ -69,6 +69,7 @@ def _collect_roi_channels(
     roi_config: Dict[str, object],
     n_mels: int,
     smooth_win: int,
+    voicing_cols: Sequence[int],
 ) -> Dict[str, Sequence[int]]:
     roi_map: Dict[str, Sequence[int]] = {}
     for sid in subject_ids:
@@ -79,7 +80,7 @@ def _collect_roi_channels(
             top_k=int(roi_config.get("top_k", 3)),
             n_mels=n_mels,
             smooth_win=smooth_win,
-            voicing_column=roi_config.get("voicing_column"),
+            voicing_cols=voicing_cols,
         )
         roi_map[sid] = roi
     return roi_map
@@ -93,6 +94,7 @@ def _collect_offsets(
     frame_hz: float,
     n_mels: int,
     smooth_win: int,
+    voicing_cols: Sequence[int],
 ) -> Dict[str, int]:
     offsets_ms = offset_config.get("candidate_offsets_ms", [])
     candidate_offsets_frames = [int(round(ms / 1000.0 * frame_hz)) for ms in offsets_ms]
@@ -108,6 +110,7 @@ def _collect_offsets(
             max_lag_frames=max_lag_frames,
             n_mels=n_mels,
             smooth_win=smooth_win,
+            voicing_cols=voicing_cols,
         )
     return offset_map
 
@@ -135,11 +138,14 @@ def main() -> None:
     subject_ids = sorted({s.subject_id for s in segments})
     n_mels = int(config_dict.get("n_mels", 40))
     smooth_win = int(config_dict.get("smooth_win", 9))
+    voicing_cols = list(config_dict.get("voicing_cols", []))
 
     roi_map: Dict[str, Sequence[int]] = {}
     roi_config = config_dict.get("roi", {}) if isinstance(config_dict.get("roi", {}), dict) else {}
     if roi_config.get("enabled", False):
-        roi_map = _collect_roi_channels(segments, subject_ids, roi_config, n_mels=n_mels, smooth_win=smooth_win)
+        roi_map = _collect_roi_channels(
+            segments, subject_ids, roi_config, n_mels=n_mels, smooth_win=smooth_win, voicing_cols=voicing_cols
+        )
 
     offset_map: Dict[str, int] = {}
     offset_config = config_dict.get("offset", {}) if isinstance(config_dict.get("offset", {}), dict) else {}
@@ -153,6 +159,7 @@ def main() -> None:
             frame_hz=frame_hz,
             n_mels=n_mels,
             smooth_win=smooth_win,
+            voicing_cols=voicing_cols,
         )
 
     trf_section = config_dict.get("trf", {}) if isinstance(config_dict.get("trf", {}), dict) else {}
@@ -171,6 +178,7 @@ def main() -> None:
         offset_map=offset_map,
         n_mels=n_mels,
         smooth_win=smooth_win,
+        voicing_cols=voicing_cols,
     )
 
     output_path = _ensure_results_dir(config_dict)
@@ -179,6 +187,11 @@ def main() -> None:
     if not results.empty:
         mean_r2 = results["mean_r2"].median()
         print(f"Median subject mean R^2: {mean_r2:.4f}")
+        if "median_pred_r" in results.columns:
+            med_r = results["median_pred_r"].median()
+            med_r0 = results["median_pred_r_null"].median()
+            print(f"Median subject median_pred_r: {med_r:.4f}")
+            print(f"Median subject median_pred_r_null: {med_r0:.4f}")
 
 
 if __name__ == "__main__":

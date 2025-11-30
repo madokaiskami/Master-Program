@@ -44,6 +44,8 @@ class Segment:
     sound: np.ndarray
     event_index: int | None = None
     audio_file: str | None = None
+    eeg_path: str | None = None
+    audio_path: str | None = None
 
 
 _PATH_CANDIDATES = ["eeg_aligned_path", "eeg_aligned", "eeg_path", "eeg"]
@@ -134,6 +136,8 @@ def load_segments_from_hf_manifest(
                 sound=sound,
                 event_index=None if pd.isna(row.get("event_index")) else int(row.get("event_index")),
                 audio_file=None if pd.isna(row.get("audio_file")) else str(row.get("audio_file")),
+                eeg_path=str(eeg_path),
+                audio_path=str(audio_path),
             )
         )
 
@@ -149,13 +153,15 @@ def filter_and_summarize(segments: List[Segment], min_frames: int = 20) -> List[
     empty_eeg = 0
     empty_audio = 0
     too_short = 0
+    bad_dims = 0
 
     for seg in segments:
+        if seg.eeg.ndim != 2 or seg.sound.ndim != 2:
+            bad_dims += 1
+            continue
         if seg.eeg.size == 0 or seg.sound.size == 0:
-            if seg.eeg.size == 0:
-                empty_eeg += 1
-            if seg.sound.size == 0:
-                empty_audio += 1
+            empty_eeg += int(seg.eeg.size == 0)
+            empty_audio += int(seg.sound.size == 0)
             continue
         if seg.eeg.shape[0] == 0 or seg.sound.shape[0] == 0:
             empty_time += 1
@@ -166,13 +172,14 @@ def filter_and_summarize(segments: List[Segment], min_frames: int = 20) -> List[
         kept.append(seg)
 
     logger.info(
-        "Total %d segments → kept %d (empty_time=%d, empty_eeg=%d, empty_audio=%d, short=%d)",
+        "Total %d segments → kept %d (empty_time=%d, empty_eeg=%d, empty_audio=%d, short=%d, bad_dims=%d)",
         len(segments),
         len(kept),
         empty_time,
         empty_eeg,
         empty_audio,
         too_short,
+        bad_dims,
     )
     return kept
 
@@ -180,27 +187,32 @@ def filter_and_summarize(segments: List[Segment], min_frames: int = 20) -> List[
 def nan_inf_report(segments: List[Segment]) -> None:
     """Log how many segments contain NaNs or Infs in EEG or sound arrays."""
 
-    eeg_nan = 0
-    eeg_inf = 0
-    sound_nan = 0
-    sound_inf = 0
+    eeg_nan = []
+    eeg_inf = []
+    sound_nan = []
+    sound_inf = []
     for seg in segments:
-        eeg_nan += int(np.isnan(seg.eeg).any())
-        eeg_inf += int(np.isinf(seg.eeg).any())
-        sound_nan += int(np.isnan(seg.sound).any())
-        sound_inf += int(np.isinf(seg.sound).any())
+        eeg_nan.append(int(np.isnan(seg.eeg).any()))
+        eeg_inf.append(int(np.isinf(seg.eeg).any()))
+        sound_nan.append(int(np.isnan(seg.sound).any()))
+        sound_inf.append(int(np.isinf(seg.sound).any()))
 
+    n = len(segments) if segments else 1
     logger.info(
-        "EEG: segments=%d, with_NaN=%d, with_Inf=%d",
+        "EEG: segments=%d, with_NaN=%d (%.1f%%), with_Inf=%d (%.1f%%)",
         len(segments),
-        eeg_nan,
-        eeg_inf,
+        sum(eeg_nan),
+        100 * sum(eeg_nan) / n,
+        sum(eeg_inf),
+        100 * sum(eeg_inf) / n,
     )
     logger.info(
-        "Sound: segments=%d, with_NaN=%d, with_Inf=%d",
+        "Sound: segments=%d, with_NaN=%d (%.1f%%), with_Inf=%d (%.1f%%)",
         len(segments),
-        sound_nan,
-        sound_inf,
+        sum(sound_nan),
+        100 * sum(sound_nan) / n,
+        sum(sound_inf),
+        100 * sum(sound_inf) / n,
     )
 
 
