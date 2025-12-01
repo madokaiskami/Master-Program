@@ -5,7 +5,7 @@ import argparse
 import logging
 from itertools import combinations
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Optional
 
 from eeg_audio_benchmark.analysis.spectral_eeg import (
     compute_band_power_per_subject,
@@ -52,9 +52,13 @@ def main() -> None:
         help="One or more TRF results CSV files",
     )
     parser.add_argument(
-        "--condition-labels",
-        nargs="*",
-        help="Optional mapping of file stem/name to condition label, e.g., results.csv=time",
+        "--conditions",
+        nargs="+",
+        help=(
+            "Optional condition labels matching --trf-results, e.g.: "
+            "--trf-results res_time.csv res_psd.csv res_time_psd.csv "
+            "--conditions time_only psd_only time_psd"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -99,8 +103,15 @@ def main() -> None:
     heatmap_path = output_dir / "band_power_correlation.png"
     plot_band_correlation_heatmap(band_power_df, out_path=heatmap_path)
 
-    condition_map = _parse_mapping(args.condition_labels)
-    trf_df = load_trf_results(args.trf_results, condition_map if condition_map else None)
+    condition_map: Optional[Mapping[str, str]] = None
+    if args.conditions is not None:
+        if len(args.conditions) != len(args.trf_results):
+            raise ValueError(
+                "Number of --conditions entries must match number of --trf-results files"
+            )
+        condition_map = {str(path): condition for path, condition in zip(args.trf_results, args.conditions)}
+
+    trf_df = load_trf_results(args.trf_results, condition_map)
 
     for metric in ["mean_r2", "median_pred_r"]:
         dist_path = output_dir / f"trf_{metric}_distribution.png"

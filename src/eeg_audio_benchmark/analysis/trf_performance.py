@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -15,16 +15,27 @@ logger = logging.getLogger(__name__)
 def _infer_condition(path: Path, mapping: Mapping[str, str] | None) -> str:
     if mapping is None:
         return path.stem
-    # Allow matching by full path, name, or stem
-    key_candidates = [str(path), path.name, path.stem]
+    key_candidates = [str(path), path.stem]
     for key in key_candidates:
         if key in mapping:
             return mapping[key]
     return path.stem
 
 
-def load_trf_results(results_paths: Sequence[Path], condition_map: Mapping[str, str] | None = None) -> pd.DataFrame:
-    """Load and concatenate TRF result CSVs with a condition label."""
+def load_trf_results(
+    results_paths: Sequence[Path | str],
+    condition_map: Optional[Mapping[str, str]] = None,
+) -> pd.DataFrame:
+    """Load and concatenate TRF result CSVs with a condition label.
+
+    Parameters
+    ----------
+    results_paths:
+        Iterable of paths to TRF CSV files.
+    condition_map:
+        Optional mapping from a path (as string) or filename stem to a condition label.
+        If not provided, the filename stem will be used as the condition.
+    """
 
     frames = []
     for path in results_paths:
