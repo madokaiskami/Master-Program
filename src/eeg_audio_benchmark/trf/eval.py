@@ -42,42 +42,46 @@ def _prepare_segment_design(
     sound = shift_sound_forward(segment.sound, offset_frames) if offset_frames else segment.sound
 
     feature_list: List[np.ndarray] = []
-    if "broadband_env" in trf_config.acoustic_features:
-        feature_list.append(
-            broadband_envelope(
-                sound, n_mels=trf_config.mel_n_bands, smooth_win=trf_config.mel_smooth_win
+    representation = getattr(trf_config, "audio_representation", "handcrafted").lower()
+    if representation.startswith("transformer"):
+        X_seg = np.asarray(sound, dtype=np.float64)
+        vmask = np.ones(X_seg.shape[0], dtype=bool)
+    else:
+        if "broadband_env" in trf_config.acoustic_features:
+            feature_list.append(
+                broadband_envelope(
+                    sound, n_mels=trf_config.mel_n_bands, smooth_win=trf_config.mel_smooth_win
+                )
             )
-        )
-    if "slow_env" in trf_config.acoustic_features:
-        feature_list.append(
-            slow_envelope(
-                sound, n_mels=trf_config.mel_n_bands, smooth_win=max(trf_config.mel_smooth_win, 41)
+        if "slow_env" in trf_config.acoustic_features:
+            feature_list.append(
+                slow_envelope(
+                    sound, n_mels=trf_config.mel_n_bands, smooth_win=max(trf_config.mel_smooth_win, 41)
+                )
             )
-        )
-    if "energy" in trf_config.acoustic_features:
-        feature_list.append(energy_feature(sound, n_mels=trf_config.mel_n_bands))
-    if "mel_multi" in trf_config.acoustic_features:
-        feature_list.append(
-            mel_features_from_sound_matrix(
-                sound,
-                n_mels=trf_config.mel_n_bands,
-                bands="multi",
-                smooth_win=trf_config.mel_smooth_win,
+        if "energy" in trf_config.acoustic_features:
+            feature_list.append(energy_feature(sound, n_mels=trf_config.mel_n_bands))
+        if "mel_multi" in trf_config.acoustic_features:
+            feature_list.append(
+                mel_features_from_sound_matrix(
+                    sound,
+                    n_mels=trf_config.mel_n_bands,
+                    bands="multi",
+                    smooth_win=trf_config.mel_smooth_win,
+                )
             )
-        )
 
-    if not feature_list:
-        feature_list.append(
-            mel_features_from_sound_matrix(
-                sound,
-                n_mels=trf_config.mel_n_bands,
-                bands=trf_config.mel_mode,
-                smooth_win=trf_config.mel_smooth_win,
+        if not feature_list:
+            feature_list.append(
+                mel_features_from_sound_matrix(
+                    sound,
+                    n_mels=trf_config.mel_n_bands,
+                    bands=trf_config.mel_mode,
+                    smooth_win=trf_config.mel_smooth_win,
+                )
             )
-        )
-
-    X_seg = np.concatenate(feature_list, axis=1)
-    vmask = voiced_mask_from_sound(segment.sound, voicing_cols)
+        X_seg = np.concatenate(feature_list, axis=1)
+        vmask = voiced_mask_from_sound(segment.sound, voicing_cols)
     eeg = segment.eeg[:, roi_channels] if roi_channels else segment.eeg
     T = min(X_seg.shape[0], eeg.shape[0], len(vmask))
     X_seg = X_seg[:T]

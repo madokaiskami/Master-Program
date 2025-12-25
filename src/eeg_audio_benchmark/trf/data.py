@@ -85,6 +85,8 @@ def load_segments_from_hf_manifest(
     root: Path | str = LOCAL_DATA_ROOT,
     manifest_path: Path | None = None,
     min_columns: Iterable[str] | None = None,
+    audio_column: str | None = None,
+    audio_candidates: Iterable[str] | None = None,
 ) -> List[Segment]:
     """Load aligned EEG/audio segments from an HF manifest.
 
@@ -97,6 +99,11 @@ def load_segments_from_hf_manifest(
         under the dataset root, falling back to ``derivatives/epoch_manifest.csv``.
     min_columns:
         Optional iterable of columns that must be present in the manifest.
+    audio_column:
+        Optional explicit name of the column containing aligned audio/feature paths.
+    audio_candidates:
+        Optional iterable of candidate columns to search (takes precedence over
+        defaults if provided).
 
     Returns
     -------
@@ -116,7 +123,10 @@ def load_segments_from_hf_manifest(
             raise ValueError(f"Manifest missing required columns: {missing}")
 
     eeg_col = _pick_column(df, _PATH_CANDIDATES)
-    audio_col = _pick_column(df, _AUDIO_PATH_CANDIDATES)
+    candidates = list(audio_candidates) if audio_candidates is not None else list(_AUDIO_PATH_CANDIDATES)
+    if audio_column:
+        candidates = [audio_column] + [c for c in candidates if c != audio_column]
+    audio_col = _pick_column(df, candidates)
 
     segments: List[Segment] = []
     for _, row in df.iterrows():

@@ -13,9 +13,11 @@ from eeg_audio_benchmark.preprocessing import (
     ArtifactReportConfig,
     AudioFeatureConfig,
     EEGEpochConfig,
+    TransformerFeatureConfig,
     align_eeg_audio_pairs,
     compute_artifact_report,
     extract_audio_features,
+    extract_transformer_features,
     slice_eeg_to_epochs,
 )
 
@@ -77,6 +79,28 @@ def _build_audio_feature_config(config_dict: Dict[str, Any], dataset_root: Path)
     )
 
 
+def _build_transformer_feature_config(
+    config_dict: Dict[str, Any], dataset_root: Path
+) -> TransformerFeatureConfig | None:
+    section = config_dict.get("transformer_features", {})
+    if not section.get("enabled", True):
+        return None
+    inputs = section.get("input", {})
+    outputs = section.get("output", {})
+    params = section.get("params", {})
+    return TransformerFeatureConfig(
+        dataset_root=str(dataset_root),
+        manifest_path=inputs.get("manifest_path", f"{dataset_root}/derivatives/epoch_manifest.csv"),
+        wav_dir=inputs.get("wav_dir", f"{dataset_root}/raw/audio/stimuli"),
+        output_dir=outputs.get("feature_dir", f"{dataset_root}/derivatives/transformer_features"),
+        feature_manifest=outputs.get(
+            "feature_manifest",
+            f"{dataset_root}/derivatives/transformer_features/manifest_transformer_features.csv",
+        ),
+        **params,
+    )
+
+
 def _build_alignment_config(config_dict: Dict[str, Any], dataset_root: Path) -> AlignmentConfig | None:
     section = config_dict.get("alignment", {})
     if not section.get("enabled", True):
@@ -91,7 +115,9 @@ def _build_alignment_config(config_dict: Dict[str, Any], dataset_root: Path) -> 
         audio_feature_dir=inputs.get("audio_feature_dir", f"{dataset_root}/derivatives/audio_features"),
         output_eeg_dir=outputs.get("aligned_eeg_dir", f"{dataset_root}/derivatives/aligned/eeg"),
         output_audio_dir=outputs.get("aligned_audio_dir", f"{dataset_root}/derivatives/aligned/audio"),
+        output_transformer_dir=outputs.get("aligned_transformer_dir", f"{dataset_root}/derivatives/aligned/transformer"),
         output_manifest=outputs.get("manifest_epochs", f"{dataset_root}/manifest_epochs.csv"),
+        transformer_feature_dir=inputs.get("transformer_feature_dir", f"{dataset_root}/derivatives/transformer_features"),
         **params,
     )
 
@@ -115,6 +141,10 @@ def main() -> None:
     audio_config = _build_audio_feature_config(config_dict, dataset_root)
     if audio_config:
         extract_audio_features(audio_config)
+
+    transformer_config = _build_transformer_feature_config(config_dict, dataset_root)
+    if transformer_config:
+        extract_transformer_features(transformer_config)
 
     alignment_config = _build_alignment_config(config_dict, dataset_root)
     if alignment_config:

@@ -23,6 +23,7 @@ class AlignmentConfig:
     audio_feature_dir: str = "{dataset_root}/derivatives/audio_features"
     output_eeg_dir: str = "{dataset_root}/derivatives/aligned/eeg"
     output_audio_dir: str = "{dataset_root}/derivatives/aligned/audio"
+    output_transformer_dir: str | None = "{dataset_root}/derivatives/aligned/transformer"
     output_manifest: str = "{dataset_root}/manifest_epochs.csv"
     log_level: str = "INFO"
     eeg_sampling_rate: float = 512.0
@@ -32,6 +33,7 @@ class AlignmentConfig:
     target_hop: float = 0.011
     smoothing_sigma: float = 0.0
     missing_policy: str = "warn"
+    transformer_feature_dir: str | None = "{dataset_root}/derivatives/transformer_features"
 
 
 def _load_clean_epochs(artifact_report: Path) -> pd.DataFrame:
@@ -87,16 +89,19 @@ def _load_epoch(path: Path) -> np.ndarray:
     return epoch
 
 
-def _build_output_paths(config: AlignmentConfig, dataset_root: Path) -> Dict[str, Path]:
+def _build_output_paths(config: AlignmentConfig, dataset_root: Path) -> Dict[str, Path | None]:
     eeg_dir = resolve_dataset_path(config.output_eeg_dir, dataset_root)
     audio_dir = resolve_dataset_path(config.output_audio_dir, dataset_root)
+    transformer_dir = resolve_dataset_path(config.output_transformer_dir, dataset_root) if config.output_transformer_dir else None
     manifest_path = resolve_dataset_path(config.output_manifest, dataset_root)
     if eeg_dir is None or audio_dir is None or manifest_path is None:
         raise ValueError("output directories and manifest path must be provided")
     ensure_directory(eeg_dir)
     ensure_directory(audio_dir)
+    if transformer_dir is not None:
+        ensure_directory(transformer_dir)
     ensure_directory(manifest_path.parent)
-    return {"eeg_dir": eeg_dir, "audio_dir": audio_dir, "manifest": manifest_path}
+    return {"eeg_dir": eeg_dir, "audio_dir": audio_dir, "transformer_dir": transformer_dir, "manifest": manifest_path}
 
 
 def align_eeg_audio_pairs(config: AlignmentConfig) -> List[Tuple[Path, Path]]:
@@ -107,6 +112,9 @@ def align_eeg_audio_pairs(config: AlignmentConfig) -> List[Tuple[Path, Path]]:
     epoch_manifest = resolve_dataset_path(config.epoch_manifest, dataset_root)
     artifact_report = resolve_dataset_path(config.artifact_report, dataset_root)
     audio_feature_dir = resolve_dataset_path(config.audio_feature_dir, dataset_root)
+    transformer_feature_dir = (
+        resolve_dataset_path(config.transformer_feature_dir, dataset_root) if config.transformer_feature_dir else None
+    )
     if epoch_manifest is None or artifact_report is None or audio_feature_dir is None:
         raise ValueError("epoch_manifest, artifact_report, and audio_feature_dir are required")
 
@@ -163,6 +171,21 @@ def align_eeg_audio_pairs(config: AlignmentConfig) -> List[Tuple[Path, Path]]:
         np.save(eeg_out, eeg_interp.astype(np.float32))
         np.save(audio_out, audio_interp.astype(np.float32))
         aligned_pairs.append((eeg_out, audio_out))
+        transformer_out: Path | None = None
+        if transformer_feature_dir is not None and outputs.get("transformer_dir") is not None:
+            transformer_features_path = transformer_feature_dir / f"{audio_base}_transformer_features.npy"
+            transformer_times_path = transformer_feature_dir / f"{audio_base}_transformer_times.npy"
+            if transformer_features_path.exists() and transformer_times_path.exists():
+                transformer_features = np.load(transformer_features_path)
+                transformer_times = np.load(transformer_times_path)
+                transformer_interp = _interpolate(transformer_times, transformer_features, target_times)
+                transformer_out = outputs["transformer_dir"] / f"{base}_Transformer_aligned.npy"
+                np.save(transformer_out, transformer_interp.astype(np.float32))
+            else:
+                msg = f"Missing Transformer features for {audio_base}"
+                if config.missing_policy == "error":
+                    raise FileNotFoundError(msg)
+                logger.warning(msg)
 
         manifest_rows.append(
             {
@@ -173,6 +196,7 @@ def align_eeg_audio_pairs(config: AlignmentConfig) -> List[Tuple[Path, Path]]:
                 "audio_file": row.get("audio_file"),
                 "eeg_aligned": _relative_to_root(eeg_out, dataset_root),
                 "audio_aligned": _relative_to_root(audio_out, dataset_root),
+                "audio_transformer": _relative_to_root(transformer_out, dataset_root) if transformer_out else None,
             }
         )
 
