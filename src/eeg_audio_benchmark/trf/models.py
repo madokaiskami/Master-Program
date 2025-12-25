@@ -40,6 +40,15 @@ class TRFConfig:
     eeg_highpass_win: int = 15
     eeg_zscore_mode: str = "per_segment_channel"
 
+    # Streaming controls
+    streaming: bool = True
+    scaler: str = "standard"
+    data_chunk_rows: int | None = None
+    solver: str = "ridge_sklearn"
+    feature_reduce_method: str = "none"
+    feature_reduce_out_dim: int | None = None
+    random_state: int | None = None
+
     @property
     def alpha(self) -> float:
         """Legacy alias for ridge_alpha."""
