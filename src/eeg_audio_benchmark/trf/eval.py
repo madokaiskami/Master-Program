@@ -155,6 +155,13 @@ def eval_subject_trf_envelope(
         ycat = np.concatenate(ys)
         return Xcat, ycat
 
+    def _standardize(
+        X: np.ndarray, y: np.ndarray, mu: np.ndarray, sd: np.ndarray, y_mu: float, y_sd: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        X_std = (X - mu) / sd
+        y_std = (y - y_mu) / (y_sd if y_sd > 0 else 1.0)
+        return X_std, y_std
+
     tuned_config = trf_config
     if trf_config.ridge_alpha_grid:
         Xall, yall = _concat(range(len(per_segment_Xy)))
@@ -191,10 +198,16 @@ def eval_subject_trf_envelope(
             model = TRFEncoder(tuned_config)
             model.fit(Xtr_std, ytr_std.reshape(-1, 1))
 
+            assert len(np.intersect1d(tr_idx, va_idx)) == 0
+            Xva, yva = _concat(va_idx)
+            Xva_std, yva_std = _standardize(Xva, yva, mu, sd, y_mu, y_sd)
+            preds_va = model.predict(Xva_std).reshape(-1)
+            # R² now computed on validation set instead of training set.
+            r2_scores.append(float(r2_score(yva_std, preds_va)))
+
             for idx in va_idx:
                 Xv, yv = per_segment_Xy[idx]
-                Xv_std = (Xv - mu) / sd
-                yv_std = (yv - y_mu) / (y_sd if y_sd > 0 else 1.0)
+                Xv_std, yv_std = _standardize(Xv, yv, mu, sd, y_mu, y_sd)
                 pred = model.predict(Xv_std).reshape(-1)
                 if np.std(yv_std) > 0 and np.std(pred) > 0:
                     seg_corrs.append(float(np.corrcoef(yv_std, pred)[0, 1]))
@@ -203,13 +216,20 @@ def eval_subject_trf_envelope(
                 if np.std(yperm) > 0 and np.std(pred) > 0:
                     seg_corrs_null.append(float(np.corrcoef(yperm, pred)[0, 1]))
 
-            preds_tr = model.predict(Xtr_std).reshape(-1)
-            r2_scores.append(float(r2_score(ytr_std, preds_tr)))
             ytr_perm = rng.permutation(ytr_std)
             null_model = TRFEncoder(tuned_config)
             null_model.fit(Xtr_std, ytr_perm.reshape(-1, 1))
-            null_preds = null_model.predict(Xtr_std).reshape(-1)
-            null_r2_scores.append(float(r2_score(ytr_std, null_preds)))
+            null_preds_va = null_model.predict(Xva_std).reshape(-1)
+            null_r2_scores.append(float(r2_score(yva_std, null_preds_va)))
+
+            logger.info(
+                "Fold train=%d val=%d r2=%.4f r2_null=%.4f",
+                len(ytr),
+                len(yva),
+                r2_scores[-1],
+                null_r2_scores[-1],
+            )
+            logger.debug("Fold train/val index intersection size: %d", len(np.intersect1d(tr_idx, va_idx)))
     else:
         Xall, yall = _concat(range(len(per_segment_Xy)))
         mu, sd = Xall.mean(axis=0), Xall.std(axis=0)
