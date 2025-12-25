@@ -95,8 +95,8 @@ def _resample_features(features: np.ndarray, duration: float, target_sr: int) ->
     if features.ndim != 3:
         raise ValueError(f"Expected features with shape (batch, frames, dim); got {features.shape}")
     seq_len = features.shape[1]
-    times = np.linspace(0, duration, num=seq_len, endpoint=False, dtype=np.float64)
-    target_times = np.arange(0, duration, 1.0 / float(target_sr), dtype=np.float64)
+    times = np.linspace(0, duration, num=seq_len, endpoint=False, dtype=np.float32)
+    target_times = np.arange(0, duration, 1.0 / float(target_sr), dtype=np.float32)
     resampled = np.vstack(
         [np.interp(target_times, times, features[0, :, dim], left=np.nan, right=np.nan) for dim in range(features.shape[2])]
     ).T
