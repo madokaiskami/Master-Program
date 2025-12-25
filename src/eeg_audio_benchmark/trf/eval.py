@@ -15,7 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.random_projection import GaussianRandomProjection
 
 from .data import Segment
-from .evaluation import evaluate_predictions
+from eeg_audio_benchmark.evaluation import evaluate_predictions
 from .features import (
     broadband_envelope,
     build_lagged_features_lazy,
