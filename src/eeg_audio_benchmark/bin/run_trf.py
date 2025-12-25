@@ -193,6 +193,10 @@ def main() -> None:
             voicing_cols=voicing_cols,
         )
 
+    model_section = trf_section.get("model", {}) if isinstance(trf_section.get("model", {}), dict) else {}
+    data_section = trf_section.get("data", {}) if isinstance(trf_section.get("data", {}), dict) else {}
+    feature_reduce_section = model_section.get("feature_reduce", {}) if isinstance(model_section.get("feature_reduce", {}), dict) else {}
+
     trf_config = TRFConfig(
         ridge_alpha=float(trf_section.get("ridge_alpha", trf_section.get("alpha", 1.0))),
         ridge_alpha_grid=trf_section.get("ridge_alpha_grid"),
@@ -209,6 +213,13 @@ def main() -> None:
         acoustic_features=list(trf_section.get("acoustic_features", ["broadband_env"])),
         eeg_highpass_win=int(trf_section.get("eeg_highpass_win", 15)),
         eeg_zscore_mode=str(trf_section.get("eeg_zscore_mode", "per_segment_channel")),
+        streaming=bool(trf_section.get("streaming", True)),
+        scaler=str(trf_section.get("scaler", "standard")),
+        data_chunk_rows=data_section.get("chunk_rows", trf_section.get("data_chunk_rows")),
+        solver=str(model_section.get("solver", trf_section.get("solver", "ridge_sklearn"))),
+        feature_reduce_method=str(feature_reduce_section.get("method", trf_section.get("feature_reduce_method", "none"))),
+        feature_reduce_out_dim=feature_reduce_section.get("out_dim", trf_section.get("feature_reduce_out_dim")),
+        random_state=trf_section.get("random_state"),
     )
     n_splits = int(trf_section.get("n_splits", 5))
     if segments and trf_config.audio_representation.lower().startswith("transformer"):
