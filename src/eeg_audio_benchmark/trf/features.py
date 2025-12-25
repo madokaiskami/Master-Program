@@ -185,22 +185,85 @@ def build_lagged_features(
 
     if features.ndim != 2:
         raise ValueError("Features must be a 2D array (T, D)")
+
+    # 强制 float32：避免后面 upcast 成 float64
+    features = np.asarray(features, dtype=np.float32, order="C")
+
     lags = list(range(-n_pre, n_post + 1))
     T, D = features.shape
-    X = np.zeros((T, len(lags) * D), dtype=np.float64)
+    n_lags = len(lags)
+
+    # X 全程 float32
+    X = np.zeros((T, n_lags * D), dtype=np.float32)
+
     for j in range(D):
         env = features[:, j]
+        base = j * n_lags
         for i, lag in enumerate(lags):
-            col = j * len(lags) + i
+            col = base + i
             if lag >= 0:
                 X[lag:, col] = env[: T - lag]
             else:
                 X[: T + lag, col] = env[-lag:]
+
     if voicing is None:
         return X
-    v = np.asarray(voicing, dtype=np.float64).reshape(-1)
-    v = v[:T]
-    return np.hstack([X[:T], v.reshape(-1, 1)])
+
+    # voicing -> float32 列向量，长度对齐
+    v = np.asarray(voicing, dtype=np.float32).reshape(-1)
+    if v.shape[0] < T:
+        # 不够长就按最短截断（和你原逻辑一致）
+        T2 = v.shape[0]
+    else:
+        T2 = T
+    X = X[:T2]
+    v = v[:T2]
+
+    # 避免 np.hstack：一次性分配 + 填充
+    out = np.empty((T2, X.shape[1] + 1), dtype=np.float32)
+    out[:, :-1] = X
+    out[:, -1] = v
+    return out
+
+
+
+def build_lagged_features_lazy(
+    features: np.ndarray,
+    n_pre: int,
+    n_post: int,
+    voicing: np.ndarray | None = None,
+    chunk_rows: int | None = None,
+) -> Iterator[Tuple[int, np.ndarray]]:
+    """Generate lagged design chunks without materializing the full matrix.
+
+    Parameters
+    ----------
+    features:
+        Input acoustic features of shape (T, D).
+    n_pre / n_post:
+        Number of past/future lags (inclusive) to include.
+    voicing:
+        Optional voiced mask aligned with ``features`` (1D array of length ``T``).
+    chunk_rows:
+        Optional chunk size along the time dimension. If ``None``, yields a single
+        full design matrix. Otherwise, lags are computed using a local window with
+        sufficient context around each chunk to avoid boundary artifacts.
+    """
+
+    if chunk_rows is None or chunk_rows <= 0:
+        yield 0, build_lagged_features(features, n_pre=n_pre, n_post=n_post, voicing=voicing)
+        return
+
+    T = features.shape[0]
+    for start in range(0, T, chunk_rows):
+        end = min(start + chunk_rows, T)
+        ctx_start = max(0, start - n_pre)
+        ctx_end = min(T, end + n_post)
+        local_feats = features[ctx_start:ctx_end]
+        local_voicing = voicing[ctx_start:ctx_end] if voicing is not None else None
+        lagged_local = build_lagged_features(local_feats, n_pre=n_pre, n_post=n_post, voicing=local_voicing)
+        offset = start - ctx_start
+        yield start, lagged_local[offset : offset + (end - start)]
 
 
 def build_lagged_features_lazy(
