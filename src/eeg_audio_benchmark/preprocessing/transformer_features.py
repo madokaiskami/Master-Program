@@ -61,10 +61,19 @@ def _load_transformer(model_name: str, device: str):
     from transformers import AutoModel, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model_name)
+
+    # ---- compatibility: transformers>=? Wav2Vec2Processor has no .sampling_rate ----
+    if not hasattr(processor, "sampling_rate"):
+        fe = getattr(processor, "feature_extractor", None)
+        sr = getattr(fe, "sampling_rate", None) if fe is not None else None
+        setattr(processor, "sampling_rate", int(sr) if sr is not None else 16000)
+    # ------------------------------------------------------------------------------
+
     model = AutoModel.from_pretrained(model_name)
     model.eval()
     model.to(device)
     return processor, model
+
 
 
 def _select_hidden_states(outputs, layer: Optional[int]) -> np.ndarray:
@@ -86,8 +95,8 @@ def _resample_features(features: np.ndarray, duration: float, target_sr: int) ->
     if features.ndim != 3:
         raise ValueError(f"Expected features with shape (batch, frames, dim); got {features.shape}")
     seq_len = features.shape[1]
-    times = np.linspace(0, duration, num=seq_len, endpoint=False, dtype=np.float64)
-    target_times = np.arange(0, duration, 1.0 / float(target_sr), dtype=np.float64)
+    times = np.linspace(0, duration, num=seq_len, endpoint=False, dtype=np.float32)
+    target_times = np.arange(0, duration, 1.0 / float(target_sr), dtype=np.float32)
     resampled = np.vstack(
         [
             np.interp(target_times, times, features[0, :, dim], left=np.nan, right=np.nan)
