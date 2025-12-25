@@ -1,0 +1,42 @@
+# TRF baseline using Transformer (wav2vec2) stimulus representations
+
+dataset_root: data/hf_eeg_audio
+manifest_path: data/hf_eeg_audio/manifest_epochs.csv
+output_dir: results/trf
+
+frame_hz: 90.9
+qc:
+  min_frames: 20
+
+roi:
+  enabled: true
+  max_lag_frames: 18
+  top_k: 3
+
+offset:
+  enabled: true
+  candidate_offsets_ms: [0, 33, 55, 88, 121]
+  max_lag_frames: 18
+
+trf:
+  audio_representation: "transformer"
+  audio_path_column: "audio_transformer"
+  transformer_feature_dir: "data/hf_eeg_audio/derivatives/transformer_features"
+  transformer_layer: -1
+
+  n_pre_frames: 18
+  n_post_frames: 36
+
+  mel_n_bands: 40
+  mel_mode: "multi"
+  mel_smooth_win: 9
+
+  acoustic_features: []
+
+  ridge_alpha: 1.0
+  ridge_alpha_grid: [0.1, 1.0, 10.0]
+  ridge_cv_folds: 3
+
+  eeg_highpass_win: 21
+  eeg_zscore_mode: "per_subject_channel"
+  n_splits: 5

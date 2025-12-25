@@ -49,15 +49,32 @@ audio_features:
     pyin_fmin: 50.0
     pyin_fmax: 600.0
 
+transformer_features:
+  enabled: true
+  input:
+    manifest_path: "{dataset_root}/derivatives/epoch_manifest.csv"
+    wav_dir: "{dataset_root}/raw/audio/stimuli"
+  output:
+    feature_dir: "{dataset_root}/derivatives/transformer_features"
+    feature_manifest: "{dataset_root}/derivatives/transformer_features/manifest_transformer_features.csv"
+  params:
+    model_name: "facebook/wav2vec2-base"
+    layer: -1
+    target_sr: 50
+    batch_size: 1
+    device: "cpu"
+
 alignment:
   enabled: true
   input:
     epoch_manifest: "{dataset_root}/derivatives/epoch_manifest.csv"
     artifact_report: "{dataset_root}/derivatives/qc/artifacts_report.csv"
     audio_feature_dir: "{dataset_root}/derivatives/audio_features"
+    transformer_feature_dir: "{dataset_root}/derivatives/transformer_features"
   output:
     aligned_eeg_dir: "{dataset_root}/derivatives/aligned/eeg"
     aligned_audio_dir: "{dataset_root}/derivatives/aligned/audio"
+    aligned_transformer_dir: "{dataset_root}/derivatives/aligned/transformer"
     manifest_epochs: "{dataset_root}/manifest_epochs.csv"
   params:
     eeg_sampling_rate: 512.0

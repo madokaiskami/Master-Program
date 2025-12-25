@@ -22,6 +22,11 @@ class TRFConfig:
     n_pre: int = 5
     n_post: int = 10
 
+    audio_representation: str = "handcrafted"
+    audio_path_column: str | None = None
+    transformer_feature_dir: str | None = None
+    transformer_layer: int | None = None
+
     ridge_alpha: float = 1.0
     ridge_alpha_grid: Optional[Sequence[float]] = None
     ridge_cv_folds: int = 3

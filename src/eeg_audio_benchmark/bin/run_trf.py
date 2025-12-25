@@ -16,9 +16,12 @@ from eeg_audio_benchmark.trf.data import (
     nan_inf_report,
 )
 from eeg_audio_benchmark.trf.eval import run_trf_analysis_per_subject
+from eeg_audio_benchmark.trf.features import build_lagged_features
 from eeg_audio_benchmark.trf.models import TRFConfig
 from eeg_audio_benchmark.trf.offset import pick_best_global_offset
 from eeg_audio_benchmark.trf.roi import select_roi_channels_for_subject
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,14 +140,23 @@ def main() -> None:
         )
 
     manifest_path = _resolve_manifest(config_dict, dataset_root)
-    segments = load_segments_from_hf_manifest(dataset_root, manifest_path=manifest_path)
+    trf_section = config_dict.get("trf", {}) if isinstance(config_dict.get("trf", {}), dict) else {}
+    audio_column = trf_section.get("audio_path_column")
+    default_audio_candidates = ["audio_transformer"] if str(trf_section.get("audio_representation", "handcrafted")).lower().startswith("transformer") else []
+    configured_candidates = list(trf_section.get("audio_candidates", []))
+    audio_candidates = default_audio_candidates + [c for c in configured_candidates if c not in default_audio_candidates]
+    segments = load_segments_from_hf_manifest(
+        dataset_root,
+        manifest_path=manifest_path,
+        audio_column=audio_column,
+        audio_candidates=audio_candidates or None,
+    )
     qc_config = config_dict.get("qc", {}) if isinstance(config_dict.get("qc", {}), dict) else {}
     min_frames = int(qc_config.get("min_frames", 20))
     segments = filter_and_summarize(segments, min_frames=min_frames)
     nan_inf_report(segments)
 
     subject_ids = sorted({s.subject_id for s in segments})
-    trf_section = config_dict.get("trf", {}) if isinstance(config_dict.get("trf", {}), dict) else {}
     n_mels = int(trf_section.get("mel_n_bands", config_dict.get("n_mels", 40)))
     smooth_win = int(trf_section.get("mel_smooth_win", config_dict.get("smooth_win", 9)))
     mel_mode = str(trf_section.get("mel_mode", "envelope"))
@@ -187,6 +199,10 @@ def main() -> None:
         ridge_cv_folds=int(trf_section.get("ridge_cv_folds", 3)),
         n_pre=int(trf_section.get("n_pre_frames", trf_section.get("n_pre", 5))),
         n_post=int(trf_section.get("n_post_frames", trf_section.get("n_post", 10))),
+        audio_representation=str(trf_section.get("audio_representation", "handcrafted")),
+        audio_path_column=str(audio_column) if audio_column else None,
+        transformer_feature_dir=str(trf_section.get("transformer_feature_dir")) if trf_section.get("transformer_feature_dir") else None,
+        transformer_layer=int(trf_section.get("transformer_layer")) if trf_section.get("transformer_layer") is not None else None,
         mel_n_bands=n_mels,
         mel_mode=mel_mode,
         mel_smooth_win=smooth_win,
@@ -195,6 +211,23 @@ def main() -> None:
         eeg_zscore_mode=str(trf_section.get("eeg_zscore_mode", "per_segment_channel")),
     )
     n_splits = int(trf_section.get("n_splits", 5))
+    if segments and trf_config.audio_representation.lower().startswith("transformer"):
+        sample = segments[0]
+        logger.info(
+            "Example Transformer-aligned segment: sound shape=%s dtype=%s (audio_path=%s)",
+            sample.sound.shape,
+            sample.sound.dtype,
+            sample.audio_path,
+        )
+        try:
+            lagged = build_lagged_features(
+                sample.sound[: min(sample.sound.shape[0], 50)],
+                n_pre=trf_config.n_pre,
+                n_post=trf_config.n_post,
+            )
+            logger.info("Lagged Transformer design matrix columns: %d", lagged.shape[1])
+        except Exception as exc:  # pragma: no cover - logging only
+            logger.warning("Failed to build example lagged features: %s", exc)
 
     results = run_trf_analysis_per_subject(
         segments,
