@@ -59,13 +59,21 @@ def _unique_audio_files(manifest_path: Path, dataset_root: Path, wav_dir: Path) 
 
 def _load_transformer(model_name: str, device: str):
     from transformers import AutoModel, AutoProcessor
-    import torch
 
     processor = AutoProcessor.from_pretrained(model_name)
+
+    # ---- compatibility: transformers>=? Wav2Vec2Processor has no .sampling_rate ----
+    if not hasattr(processor, "sampling_rate"):
+        fe = getattr(processor, "feature_extractor", None)
+        sr = getattr(fe, "sampling_rate", None) if fe is not None else None
+        setattr(processor, "sampling_rate", int(sr) if sr is not None else 16000)
+    # ------------------------------------------------------------------------------
+
     model = AutoModel.from_pretrained(model_name)
     model.eval()
     model.to(device)
     return processor, model
+
 
 
 def _select_hidden_states(outputs, layer: Optional[int]) -> np.ndarray:
