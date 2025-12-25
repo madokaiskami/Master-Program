@@ -4,7 +4,7 @@ dataset_root: data/hf_eeg_audio
 manifest_path: data/hf_eeg_audio/manifest_epochs.csv
 output_dir: results/trf
 
-frame_hz: 60.6
+frame_hz: 90.9
 qc:
   min_frames: 20
 
@@ -19,6 +19,13 @@ offset:
   max_lag_frames: 18
 
 trf:
+  model:
+    solver: ridge_sklearn
+    feature_reduce:
+      method: rp   # 或 pca
+      out_dim: 128
+      reducer_out_dim: 128
+
   audio_representation: "transformer"
   audio_path_column: "audio_transformer"
   transformer_feature_dir: "data/hf_eeg_audio/derivatives/transformer_features"
