@@ -4,7 +4,7 @@ dataset_root: data/hf_eeg_audio
 manifest_path: data/hf_eeg_audio/manifest_epochs.csv
 output_dir: results/trf
 
-frame_hz: 90.9
+frame_hz: 60.6
 qc:
   min_frames: 20
 
@@ -24,8 +24,8 @@ trf:
   transformer_feature_dir: "data/hf_eeg_audio/derivatives/transformer_features"
   transformer_layer: -1
 
-  n_pre_frames: 18
-  n_post_frames: 36
+  n_pre_frames: 9
+  n_post_frames: 18
 
   mel_n_bands: 40
   mel_mode: "multi"
