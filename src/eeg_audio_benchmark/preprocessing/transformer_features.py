@@ -28,7 +28,7 @@ class TransformerFeatureConfig:
     )
     model_name: str = "facebook/wav2vec2-base"
     layer: Optional[int] = None
-    target_sr: int = 50
+    target_sr: int = 50          # 目标“特征时间轴”采样率(Hz)，不是 wav2vec2 的 16k
     batch_size: int = 1
     device: str = "cpu"
     log_level: str = "INFO"
@@ -59,7 +59,6 @@ def _unique_audio_files(manifest_path: Path, dataset_root: Path, wav_dir: Path) 
 
 def _load_transformer(model_name: str, device: str):
     from transformers import AutoModel, AutoProcessor
-    import torch
 
     processor = AutoProcessor.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
@@ -90,7 +89,10 @@ def _resample_features(features: np.ndarray, duration: float, target_sr: int) ->
     times = np.linspace(0, duration, num=seq_len, endpoint=False, dtype=np.float64)
     target_times = np.arange(0, duration, 1.0 / float(target_sr), dtype=np.float64)
     resampled = np.vstack(
-        [np.interp(target_times, times, features[0, :, dim], left=np.nan, right=np.nan) for dim in range(features.shape[2])]
+        [
+            np.interp(target_times, times, features[0, :, dim], left=np.nan, right=np.nan)
+            for dim in range(features.shape[2])
+        ]
     ).T
     return np.nan_to_num(resampled, nan=0.0).astype(np.float32), target_times.astype(np.float32)
 
@@ -100,6 +102,21 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _get_wav2vec_sampling_rate(processor) -> int:
+    """
+    兼容不同 transformers 版本：
+    - 有的 processor 没有 sampling_rate
+    - 采样率通常在 processor.feature_extractor.sampling_rate
+    """
+    sr = getattr(processor, "sampling_rate", None)
+    if sr is None:
+        fe = getattr(processor, "feature_extractor", None)
+        sr = getattr(fe, "sampling_rate", None)
+    if sr is None:
+        sr = 16000
+    return int(sr)
 
 
 def _extract_single(
@@ -112,13 +129,24 @@ def _extract_single(
 ) -> Tuple[np.ndarray, np.ndarray]:
     import torch
 
-    waveform, sr = librosa.load(wav_path, sr=processor.sampling_rate)
-    inputs = processor(waveform, sampling_rate=sr, return_tensors="pt")
+    # ---- FIX: 不再依赖 processor.sampling_rate ----
+    wav2vec_sr = _get_wav2vec_sampling_rate(processor)
+
+    # wav2vec2 输入音频需要被 resample 到 wav2vec_sr（通常 16k）
+    waveform, _ = librosa.load(wav_path, sr=wav2vec_sr)
+
+    # 显式传 sampling_rate，避免不同版本行为差异
+    inputs = processor(waveform, sampling_rate=wav2vec_sr, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
+
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
+
     hidden = _select_hidden_states(outputs, layer=layer)
-    duration = len(waveform) / float(processor.sampling_rate)
+
+    # duration 用 wav2vec_sr 算
+    duration = len(waveform) / float(wav2vec_sr)
+
     resampled, times = _resample_features(hidden, duration=duration, target_sr=target_sr)
     return resampled, times
 

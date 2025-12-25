@@ -185,22 +185,46 @@ def build_lagged_features(
 
     if features.ndim != 2:
         raise ValueError("Features must be a 2D array (T, D)")
+
+    # 强制 float32：避免后面 upcast 成 float64
+    features = np.asarray(features, dtype=np.float32, order="C")
+
     lags = list(range(-n_pre, n_post + 1))
     T, D = features.shape
-    X = np.zeros((T, len(lags) * D), dtype=np.float64)
+    n_lags = len(lags)
+
+    # X 全程 float32
+    X = np.zeros((T, n_lags * D), dtype=np.float32)
+
     for j in range(D):
         env = features[:, j]
+        base = j * n_lags
         for i, lag in enumerate(lags):
-            col = j * len(lags) + i
+            col = base + i
             if lag >= 0:
                 X[lag:, col] = env[: T - lag]
             else:
                 X[: T + lag, col] = env[-lag:]
+
     if voicing is None:
         return X
-    v = np.asarray(voicing, dtype=np.float64).reshape(-1)
-    v = v[:T]
-    return np.hstack([X[:T], v.reshape(-1, 1)])
+
+    # voicing -> float32 列向量，长度对齐
+    v = np.asarray(voicing, dtype=np.float32).reshape(-1)
+    if v.shape[0] < T:
+        # 不够长就按最短截断（和你原逻辑一致）
+        T2 = v.shape[0]
+    else:
+        T2 = T
+    X = X[:T2]
+    v = v[:T2]
+
+    # 避免 np.hstack：一次性分配 + 填充
+    out = np.empty((T2, X.shape[1] + 1), dtype=np.float32)
+    out[:, :-1] = X
+    out[:, -1] = v
+    return out
+
 
 
 __all__ = [
